@@ -45,30 +45,6 @@ type realStatusUpdater struct {
 	client.Client
 }
 
-func (r *realStatusUpdater) UpdateCloneSetStatus(cs *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus, pods []*v1.Pod) error {
-	r.calculateStatus(cs, newStatus, pods)
-	if err := clonesetcore.New(cs).ExtraStatusCalculation(newStatus, pods); err != nil {
-		return fmt.Errorf("failed to calculate extra status for cloneSet %s/%s: %v", cs.Namespace, cs.Name, err)
-	}
-	if !r.inconsistentStatus(cs, newStatus) {
-		return nil
-	}
-	klog.Infof("To update CloneSet status for  %s/%s, replicas=%d ready=%d available=%d updated=%d updatedReady=%d, revisions current=%s update=%s",
-		cs.Namespace, cs.Name, newStatus.Replicas, newStatus.ReadyReplicas, newStatus.AvailableReplicas, newStatus.UpdatedReplicas, newStatus.UpdatedReadyReplicas, newStatus.CurrentRevision, newStatus.UpdateRevision)
-	return r.updateStatus(cs, newStatus)
-}
-
-func (r *realStatusUpdater) updateStatus(cs *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		clone := &appsv1alpha1.CloneSet{}
-		if err := r.Get(context.TODO(), types.NamespacedName{Namespace: cs.Namespace, Name: cs.Name}, clone); err != nil {
-			return err
-		}
-		clone.Status = *newStatus
-		return r.Status().Update(context.TODO(), clone)
-	})
-}
-
 func (r *realStatusUpdater) inconsistentStatus(cs *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus) bool {
 	oldStatus := cs.Status
 	return newStatus.ObservedGeneration > oldStatus.ObservedGeneration ||
@@ -113,3 +89,29 @@ func (r *realStatusUpdater) calculateStatus(cs *appsv1alpha1.CloneSet, newStatus
 		newStatus.ExpectedUpdatedReplicas = *cs.Spec.Replicas - int32(partition)
 	}
 }
+
+func (r *realStatusUpdater) UpdateCloneSetStatus(cs *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus, pods []*v1.Pod) error {
+	r.calculateStatus(cs, newStatus, pods)
+	if err := clonesetcore.New(cs).ExtraStatusCalculation(newStatus, pods); err != nil {
+		return fmt.Errorf("failed to calculate extra status for cloneSet %s/%s: %v", cs.Namespace, cs.Name, err)
+	}
+	if !r.inconsistentStatus(cs, newStatus) {
+		return nil
+	}
+	klog.Infof("To update CloneSet status for  %s/%s, replicas=%d ready=%d available=%d updated=%d updatedReady=%d, revisions current=%s update=%s",
+		cs.Namespace, cs.Name, newStatus.Replicas, newStatus.ReadyReplicas, newStatus.AvailableReplicas, newStatus.UpdatedReplicas, newStatus.UpdatedReadyReplicas, newStatus.CurrentRevision, newStatus.UpdateRevision)
+	return r.updateStatus(cs, newStatus)
+}
+
+func (r *realStatusUpdater) updateStatus(cs *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		clone := &appsv1alpha1.CloneSet{}
+		if err := r.Get(context.TODO(), types.NamespacedName{Namespace: cs.Namespace, Name: cs.Name}, clone); err != nil {
+			return err
+		}
+		clone.Status = *newStatus
+		return r.Status().Update(context.TODO(), clone)
+	})
+}
+
+//

@@ -1,0 +1,49 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: PodProbeMarker
+metadata:
+  name: game-server-probe
+spec:
+  selector:
+    matchLabels:
+      app: game-server-probe
+  probes:
+  - name: Idle
+    containerName: game-server
+    probe:
+      exec:
+        command:
+        - telnet 127.0.0.1 8080
+      initialDelaySeconds: 10
+      timeoutSeconds: 3
+      periodSeconds: 10
+      successThreshold: 1
+      failureThreshold: 3
+    markerPolicy:
+    - state: Succeeded
+      labels:
+        gameserver-idle: 'true'
+      annotations:
+        controller.kubernetes.io/pod-deletion-cost: '-10'
+    - state: Failed
+      labels:
+        gameserver-idle: 'false'
+      annotations:
+        controller.kubernetes.io/pod-deletion-cost: '10'
+    podConditionType: game.io/idle
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: game-server-probe
+  labels:
+    app: game-server-probe
+spec:
+  containers:
+  - name: game-server-probe
+    image: centos:7
+    command:
+    - "/bin/sh"
+    - "-c"
+    - "sleep 1d"
+    imagePullPolicy: IfNotPresent
+  restartPolicy: Always

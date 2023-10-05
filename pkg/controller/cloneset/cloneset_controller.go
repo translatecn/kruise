@@ -22,6 +22,8 @@ import (
 	"flag"
 	"time"
 
+	fieldindex "github.com/openkruise/kruise/pkg/util/fieldindex"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruiseclient "github.com/openkruise/kruise/pkg/client"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
@@ -32,13 +34,12 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	historyutil "github.com/openkruise/kruise/pkg/util/history"
 	imagejobutilfunc "github.com/openkruise/kruise/pkg/util/imagejob/utilfunction"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+	refmanager "github.com/openkruise/kruise/pkg/util/refmanager"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -61,95 +62,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
-
-func init() {
-	flag.IntVar(&concurrentReconciles, "cloneset-workers", concurrentReconciles, "Max concurrent workers for CloneSet controller.")
-}
-
-var (
-	concurrentReconciles = 3
-
-	isPreDownloadDisabled             bool
-	minimumReplicasToPreDownloadImage int32 = 3
-)
-
-// Add creates a new CloneSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
-// and Start it when the Manager is Started.
-func Add(mgr manager.Manager) error {
-	if !utildiscovery.DiscoverGVK(clonesetutils.ControllerKind) {
-		return nil
-	}
-	if !utildiscovery.DiscoverGVK(appsv1alpha1.SchemeGroupVersion.WithKind("ImagePullJob")) ||
-		!utilfeature.DefaultFeatureGate.Enabled(features.KruiseDaemon) ||
-		!utilfeature.DefaultFeatureGate.Enabled(features.PreDownloadImageForInPlaceUpdate) {
-		isPreDownloadDisabled = true
-	}
-	return add(mgr, newReconciler(mgr))
-}
-
-// newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	recorder := mgr.GetEventRecorderFor("cloneset-controller")
-	if cli := kruiseclient.GetGenericClientWithName("cloneset-controller"); cli != nil {
-		eventBroadcaster := record.NewBroadcaster()
-		eventBroadcaster.StartLogging(klog.Infof)
-		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
-		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
-	}
-	cli := utilclient.NewClientFromManager(mgr, "cloneset-controller")
-	reconciler := &ReconcileCloneSet{
-		Client:            cli,
-		scheme:            mgr.GetScheme(),
-		recorder:          recorder,
-		statusUpdater:     newStatusUpdater(cli),
-		controllerHistory: historyutil.NewHistory(cli),
-		revisionControl:   revisioncontrol.NewRevisionControl(),
-	}
-	reconciler.syncControl = synccontrol.New(cli, reconciler.recorder)
-	reconciler.reconcileFunc = reconciler.doReconcile
-	return reconciler
-}
-
-// add adds a new Controller to mgr with r as the reconcile.Reconciler
-func add(mgr manager.Manager, r reconcile.Reconciler) error {
-	// Create a new controller
-	c, err := controller.New("cloneset-controller", mgr, controller.Options{
-		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles, CacheSyncTimeout: util.GetControllerCacheSyncTimeout(),
-		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
-	if err != nil {
-		return err
-	}
-
-	// Watch for changes to CloneSet
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &handler.EnqueueRequestForObject{}, predicate.Funcs{
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldCS := e.ObjectOld.(*appsv1alpha1.CloneSet)
-			newCS := e.ObjectNew.(*appsv1alpha1.CloneSet)
-			if *oldCS.Spec.Replicas != *newCS.Spec.Replicas {
-				klog.V(4).Infof("Observed updated replicas for CloneSet: %s/%s, %d->%d",
-					newCS.Namespace, newCS.Name, *oldCS.Spec.Replicas, *newCS.Spec.Replicas)
-			}
-			return true
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	// Watch for changes to Pod
-	err = c.Watch(&source.Kind{Type: &v1.Pod{}}, &podEventHandler{Reader: mgr.GetCache()})
-	if err != nil {
-		return err
-	}
-
-	// Watch for changes to PVC, just ensure cache updated
-	err = c.Watch(&source.Kind{Type: &v1.PersistentVolumeClaim{}}, &pvcEventHandler{})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
 
 var _ reconcile.Reconciler = &ReconcileCloneSet{}
 
@@ -174,12 +86,6 @@ type ReconcileCloneSet struct {
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets/finalizers,verbs=update
-
-// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read
-// and what is in the CloneSet.Spec
-func (r *ReconcileCloneSet) Reconcile(_ context.Context, request reconcile.Request) (reconcile.Result, error) {
-	return r.reconcileFunc(request)
-}
 
 func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcile.Result, retErr error) {
 	startTime := time.Now()
@@ -224,7 +130,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		return reconcile.Result{}, nil
 	}
 
-	// If scaling expectations have not satisfied yet, just skip this reconcile.
+	// If scaling expectations have not satisfied yet, just skip this reconcile. // 及时这里触发了 调谐，但对应对象记录的可以操作的时间 没到，也不会调谐
 	if scaleSatisfied, unsatisfiedDuration, scaleDirtyPods := clonesetutils.ScaleExpectations.SatisfiedExpectations(request.String()); !scaleSatisfied {
 		if unsatisfiedDuration >= expectations.ExpectationTimeout {
 			klog.Warningf("Expectation unsatisfied overtime for %v, scaleDirtyPods=%v, overtime=%v", request.String(), scaleDirtyPods, unsatisfiedDuration)
@@ -240,7 +146,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		return reconcile.Result{}, err
 	}
 	// filteredPVCS's ownerRef is CloneSet
-	filteredPVCs, err := r.getOwnedPVCs(instance)
+	filteredPVCs, err := r.getOwnedPVCs(instance) // 🔼✅
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -255,7 +161,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	//release Pods ownerRef
-	filteredPods, err = r.claimPods(instance, filteredPods)
+	filteredPods, err = r.claimPods(instance, filteredPods) // instance  selector 匹配到的所有存活的pod
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -268,7 +174,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	history.SortControllerRevisions(revisions)
 
 	// get the current, and update revisions
-	currentRevision, updateRevision, collisionCount, err := r.getActiveRevisions(instance, revisions)
+	currentRevision, updateRevision, collisionCount, err := r.getActiveRevisions(instance, revisions) //controllerrevisions 相关的
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -319,6 +225,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 			if updateRevision.Name != instance.Status.UpdateRevision {
 				updatedReadyReplicas = 0
 			}
+			// 滚动更新 几个之后，才会触发 镜像下载动作
 			if int32(minUpdatedReadyPodsCount) <= updatedReadyReplicas {
 				// pre-download images for new revision
 				if err := r.createImagePullJobsForInPlaceUpdate(instance, currentRevision, updateRevision); err != nil {
@@ -334,14 +241,14 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	// scale and update pods
-	syncErr := r.syncCloneSet(instance, &newStatus, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
+	syncErr := r.syncCloneSet(instance, &newStatus, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs) // 🔼✅
 
 	// update new status
-	if err = r.statusUpdater.UpdateCloneSetStatus(instance, &newStatus, filteredPods); err != nil {
+	if err = r.statusUpdater.UpdateCloneSetStatus(instance, &newStatus, filteredPods); err != nil { // 🔼✅
 		return reconcile.Result{}, err
 	}
 
-	if err = r.truncatePodsToDelete(instance, filteredPods); err != nil {
+	if err = r.truncatePodsToDelete(instance, filteredPods); err != nil { // 🔼✅
 		klog.Warningf("Failed to truncate podsToDelete for %s: %v", request, err)
 	}
 
@@ -353,172 +260,6 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		clonesetutils.DurationStore.Push(request.String(), time.Second*time.Duration(instance.Spec.MinReadySeconds))
 	}
 	return reconcile.Result{RequeueAfter: clonesetutils.DurationStore.Pop(request.String())}, syncErr
-}
-
-func (r *ReconcileCloneSet) syncCloneSet(
-	instance *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus,
-	currentRevision, updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
-	filteredPods []*v1.Pod, filteredPVCs []*v1.PersistentVolumeClaim,
-) error {
-	if instance.DeletionTimestamp != nil {
-		return nil
-	}
-
-	// get the current and update revisions of the set.
-	currentSet, err := r.revisionControl.ApplyRevision(instance, currentRevision)
-	if err != nil {
-		return err
-	}
-	updateSet, err := r.revisionControl.ApplyRevision(instance, updateRevision)
-	if err != nil {
-		return err
-	}
-
-	var scaling bool
-	var podsScaleErr error
-	var podsUpdateErr error
-
-	scaling, podsScaleErr = r.syncControl.Scale(currentSet, updateSet, currentRevision.Name, updateRevision.Name, filteredPods, filteredPVCs)
-	if podsScaleErr != nil {
-		newStatus.Conditions = append(newStatus.Conditions, appsv1alpha1.CloneSetCondition{
-			Type:               appsv1alpha1.CloneSetConditionFailedScale,
-			Status:             v1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Message:            podsScaleErr.Error(),
-		})
-		err = podsScaleErr
-	}
-	if scaling {
-		return podsScaleErr
-	}
-
-	podsUpdateErr = r.syncControl.Update(updateSet, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
-	if podsUpdateErr != nil {
-		newStatus.Conditions = append(newStatus.Conditions, appsv1alpha1.CloneSetCondition{
-			Type:               appsv1alpha1.CloneSetConditionFailedUpdate,
-			Status:             v1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Message:            podsUpdateErr.Error(),
-		})
-		if err == nil {
-			err = podsUpdateErr
-		}
-	}
-
-	return err
-}
-
-func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisions []*apps.ControllerRevision) (
-	*apps.ControllerRevision, *apps.ControllerRevision, int32, error,
-) {
-	var currentRevision, updateRevision *apps.ControllerRevision
-	revisionCount := len(revisions)
-
-	// Use a local copy of cs.Status.CollisionCount to avoid modifying cs.Status directly.
-	// This copy is returned so the value gets carried over to cs.Status in UpdateCloneSetStatus.
-	var collisionCount int32
-	if cs.Status.CollisionCount != nil {
-		collisionCount = *cs.Status.CollisionCount
-	}
-
-	// create a new revision from the current cs
-	updateRevision, err := r.revisionControl.NewRevision(cs, clonesetutils.NextRevision(revisions), &collisionCount)
-	if err != nil {
-		return nil, nil, collisionCount, err
-	}
-
-	// find any equivalent revisions
-	equalRevisions := history.FindEqualRevisions(revisions, updateRevision)
-	equalCount := len(equalRevisions)
-
-	if equalCount > 0 && history.EqualRevision(revisions[revisionCount-1], equalRevisions[equalCount-1]) {
-		// if the equivalent revision is immediately prior the update revision has not changed
-		updateRevision = revisions[revisionCount-1]
-	} else if equalCount > 0 {
-		// if the equivalent revision is not immediately prior we will roll back by incrementing the
-		// Revision of the equivalent revision
-		updateRevision, err = r.controllerHistory.UpdateControllerRevision(equalRevisions[equalCount-1], updateRevision.Revision)
-		if err != nil {
-			return nil, nil, collisionCount, err
-		}
-	} else {
-		//if there is no equivalent revision we create a new one
-		updateRevision, err = r.controllerHistory.CreateControllerRevision(cs, updateRevision, &collisionCount)
-		if err != nil {
-			return nil, nil, collisionCount, err
-		}
-	}
-
-	// attempt to find the revision that corresponds to the current revision
-	for i := range revisions {
-		if revisions[i].Name == cs.Status.CurrentRevision {
-			currentRevision = revisions[i]
-			break
-		}
-	}
-
-	// if the current revision is nil we initialize the history by setting it to the update revision
-	if currentRevision == nil {
-		currentRevision = updateRevision
-	}
-
-	return currentRevision, updateRevision, collisionCount, nil
-}
-
-func (r *ReconcileCloneSet) getOwnedPods(cs *appsv1alpha1.CloneSet) ([]*v1.Pod, []*v1.Pod, error) {
-	opts := &client.ListOptions{
-		Namespace:     cs.Namespace,
-		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
-	}
-	return clonesetutils.GetActiveAndInactivePods(r.Client, opts)
-}
-
-func (r *ReconcileCloneSet) getOwnedPVCs(cs *appsv1alpha1.CloneSet) ([]*v1.PersistentVolumeClaim, error) {
-	opts := &client.ListOptions{
-		Namespace:     cs.Namespace,
-		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
-	}
-
-	pvcList := v1.PersistentVolumeClaimList{}
-	if err := r.List(context.TODO(), &pvcList, opts, utilclient.DisableDeepCopy); err != nil {
-		return nil, err
-	}
-	var filteredPVCs []*v1.PersistentVolumeClaim
-	for i := range pvcList.Items {
-		pvc := &pvcList.Items[i]
-		if pvc.DeletionTimestamp == nil {
-			filteredPVCs = append(filteredPVCs, pvc)
-		}
-	}
-
-	return filteredPVCs, nil
-}
-
-// truncatePodsToDelete truncates any non-live pod names in spec.scaleStrategy.podsToDelete.
-func (r *ReconcileCloneSet) truncatePodsToDelete(cs *appsv1alpha1.CloneSet, pods []*v1.Pod) error {
-	if len(cs.Spec.ScaleStrategy.PodsToDelete) == 0 {
-		return nil
-	}
-
-	existingPods := sets.NewString()
-	for _, p := range pods {
-		existingPods.Insert(p.Name)
-	}
-
-	var newPodsToDelete []string
-	for _, podName := range cs.Spec.ScaleStrategy.PodsToDelete {
-		if existingPods.Has(podName) {
-			newPodsToDelete = append(newPodsToDelete, podName)
-		}
-	}
-
-	if len(newPodsToDelete) == len(cs.Spec.ScaleStrategy.PodsToDelete) {
-		return nil
-	}
-
-	newCS := cs.DeepCopy()
-	newCS.Spec.ScaleStrategy.PodsToDelete = newPodsToDelete
-	return r.Update(context.TODO(), newCS)
 }
 
 // truncateHistory truncates any non-live ControllerRevisions in revisions from cs's history. The UpdateRevision and
@@ -566,30 +307,6 @@ func (r *ReconcileCloneSet) truncateHistory(
 		}
 	}
 	return nil
-}
-
-func (r *ReconcileCloneSet) claimPods(instance *appsv1alpha1.CloneSet, pods []*v1.Pod) ([]*v1.Pod, error) {
-	mgr, err := refmanager.New(r, instance.Spec.Selector, instance, r.scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	selected := make([]metav1.Object, len(pods))
-	for i, pod := range pods {
-		selected[i] = pod
-	}
-
-	claimed, err := mgr.ClaimOwnedObjects(selected)
-	if err != nil {
-		return nil, err
-	}
-
-	claimedPods := make([]*v1.Pod, len(claimed))
-	for i, pod := range claimed {
-		claimedPods[i] = pod.(*v1.Pod)
-	}
-
-	return claimedPods, nil
 }
 
 // cleanUp unUsed pvcs, and return used pvcs.
@@ -654,14 +371,6 @@ func (r *ReconcileCloneSet) cleanupPVCs(
 	return activePVCs, nil
 }
 
-func (r *ReconcileCloneSet) updateOnePVC(cs *appsv1alpha1.CloneSet, pvc *v1.PersistentVolumeClaim) error {
-	if err := r.Client.Update(context.TODO(), pvc); err != nil {
-		r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedUpdate", "failed to update PVC %s: %v", pvc.Name, err)
-		return err
-	}
-	return nil
-}
-
 func (r *ReconcileCloneSet) deleteOnePVC(cs *appsv1alpha1.CloneSet, pvc *v1.PersistentVolumeClaim) error {
 	clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
 	if err := r.Delete(context.TODO(), pvc); err != nil {
@@ -672,7 +381,302 @@ func (r *ReconcileCloneSet) deleteOnePVC(cs *appsv1alpha1.CloneSet, pvc *v1.Pers
 	return nil
 }
 
+func init() {
+	flag.IntVar(&concurrentReconciles, "cloneset-workers", concurrentReconciles, "Max concurrent workers for CloneSet controller.")
+}
+
+var (
+	concurrentReconciles = 3
+
+	isPreDownloadDisabled             bool
+	minimumReplicasToPreDownloadImage int32 = 3
+)
+
+// Add creates a new CloneSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
+// and Start it when the Manager is Started.
+func Add(mgr manager.Manager) error {
+	if !utildiscovery.DiscoverGVK(clonesetutils.ControllerKind) {
+		return nil
+	}
+
+	if !utildiscovery.DiscoverGVK(appsv1alpha1.SchemeGroupVersion.WithKind("ImagePullJob")) ||
+		!utilfeature.DefaultFeatureGate.Enabled(features.KruiseDaemon) ||
+		!utilfeature.DefaultFeatureGate.Enabled(features.PreDownloadImageForInPlaceUpdate) {
+		isPreDownloadDisabled = true
+	}
+	return add(mgr, newReconciler(mgr))
+}
+
+// add adds a new Controller to mgr with r as the reconcile.Reconciler
+func add(mgr manager.Manager, r reconcile.Reconciler) error {
+	// Create a new controller
+	c, err := controller.New("cloneset-controller", mgr, controller.Options{
+		Reconciler:              r, // ✈️ ✅
+		MaxConcurrentReconciles: concurrentReconciles,
+		CacheSyncTimeout:        util.GetControllerCacheSyncTimeout(), //  2 * time.Minute
+		RateLimiter:             ratelimiter.DefaultControllerRateLimiter()})
+	if err != nil {
+		return err
+	}
+
+	// Watch for changes to CloneSet
+	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &handler.EnqueueRequestForObject{}, predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCS := e.ObjectOld.(*appsv1alpha1.CloneSet)
+			newCS := e.ObjectNew.(*appsv1alpha1.CloneSet)
+			if *oldCS.Spec.Replicas != *newCS.Spec.Replicas {
+				klog.V(4).Infof("Observed updated replicas for CloneSet: %s/%s, %d->%d",
+					newCS.Namespace, newCS.Name, *oldCS.Spec.Replicas, *newCS.Spec.Replicas)
+			}
+			return true
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// Watch for changes to Pod
+	err = c.Watch(&source.Kind{Type: &v1.Pod{}}, &podEventHandler{Reader: mgr.GetCache()})
+	if err != nil {
+		return err
+	}
+
+	// Watch for changes to PVC, just ensure cache updated
+	err = c.Watch(&source.Kind{Type: &v1.PersistentVolumeClaim{}}, &pvcEventHandler{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// newReconciler returns a new reconcile.Reconciler
+func newReconciler(mgr manager.Manager) reconcile.Reconciler {
+	recorder := mgr.GetEventRecorderFor("cloneset-controller")
+	if cli := kruiseclient.GetGenericClientWithName("cloneset-controller"); cli != nil {
+		eventBroadcaster := record.NewBroadcaster()
+		eventBroadcaster.StartLogging(klog.Infof)
+		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
+		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
+	}
+	cli := utilclient.NewClientFromManager(mgr, "cloneset-controller")
+	reconciler := &ReconcileCloneSet{
+		Client:            cli,
+		scheme:            mgr.GetScheme(),
+		recorder:          recorder,
+		statusUpdater:     newStatusUpdater(cli),
+		controllerHistory: historyutil.NewHistory(cli),
+		revisionControl:   revisioncontrol.NewRevisionControl(),
+	}
+	reconciler.syncControl = synccontrol.New(cli, reconciler.recorder)
+	reconciler.reconcileFunc = reconciler.doReconcile
+	return reconciler
+}
+
+func (r *ReconcileCloneSet) getOwnedPods(cs *appsv1alpha1.CloneSet) ([]*v1.Pod, []*v1.Pod, error) {
+	opts := &client.ListOptions{
+		Namespace:     cs.Namespace,
+		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
+	}
+	return clonesetutils.GetActiveAndInactivePods(r.Client, opts)
+}
+
+func (r *ReconcileCloneSet) getOwnedPVCs(cs *appsv1alpha1.CloneSet) ([]*v1.PersistentVolumeClaim, error) {
+	opts := &client.ListOptions{
+		Namespace:     cs.Namespace,
+		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
+	}
+
+	pvcList := v1.PersistentVolumeClaimList{}
+	if err := r.List(context.TODO(), &pvcList, opts, utilclient.DisableDeepCopy); err != nil {
+		return nil, err
+	}
+	var filteredPVCs []*v1.PersistentVolumeClaim
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
+		if pvc.DeletionTimestamp == nil {
+			filteredPVCs = append(filteredPVCs, pvc)
+		}
+	}
+
+	return filteredPVCs, nil
+}
+
 func updateClaimOwnerRefToPod(pvc *v1.PersistentVolumeClaim, cs *appsv1alpha1.CloneSet, pod *v1.Pod) bool {
 	util.RemoveOwnerRef(pvc, cs)
 	return util.SetOwnerRef(pvc, pod, schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
+}
+
+func (r *ReconcileCloneSet) updateOnePVC(cs *appsv1alpha1.CloneSet, pvc *v1.PersistentVolumeClaim) error {
+	if err := r.Client.Update(context.TODO(), pvc); err != nil {
+		r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedUpdate", "failed to update PVC %s: %v", pvc.Name, err)
+		return err
+	}
+	return nil
+}
+
+func (r *ReconcileCloneSet) claimPods(instance *appsv1alpha1.CloneSet, pods []*v1.Pod) ([]*v1.Pod, error) {
+	mgr, err := refmanager.New(r, instance.Spec.Selector, instance, r.scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]metav1.Object, len(pods))
+	for i, pod := range pods {
+		selected[i] = pod
+	}
+
+	claimed, err := mgr.ClaimOwnedObjects(selected)
+	if err != nil {
+		return nil, err
+	}
+
+	claimedPods := make([]*v1.Pod, len(claimed))
+	for i, pod := range claimed {
+		claimedPods[i] = pod.(*v1.Pod)
+	}
+
+	return claimedPods, nil
+}
+func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisions []*apps.ControllerRevision) (
+	*apps.ControllerRevision, *apps.ControllerRevision, int32, error,
+) {
+	var currentRevision, updateRevision *apps.ControllerRevision
+	revisionCount := len(revisions)
+
+	// Use a local copy of cs.Status.CollisionCount to avoid modifying cs.Status directly.
+	// This copy is returned so the value gets carried over to cs.Status in UpdateCloneSetStatus.
+	var collisionCount int32
+	if cs.Status.CollisionCount != nil {
+		collisionCount = *cs.Status.CollisionCount
+	}
+
+	// create a new revision from the current cs
+	updateRevision, err := r.revisionControl.NewRevision(cs, clonesetutils.NextRevision(revisions), &collisionCount)
+	if err != nil {
+		return nil, nil, collisionCount, err
+	}
+
+	// find any equivalent revisions
+	equalRevisions := history.FindEqualRevisions(revisions, updateRevision)
+	equalCount := len(equalRevisions)
+
+	if equalCount > 0 && history.EqualRevision(revisions[revisionCount-1], equalRevisions[equalCount-1]) {
+		// if the equivalent revision is immediately prior the update revision has not changed
+		updateRevision = revisions[revisionCount-1]
+	} else if equalCount > 0 {
+		// if the equivalent revision is not immediately prior we will roll back by incrementing the
+		// Revision of the equivalent revision
+		updateRevision, err = r.controllerHistory.UpdateControllerRevision(equalRevisions[equalCount-1], updateRevision.Revision)
+		if err != nil {
+			return nil, nil, collisionCount, err
+		}
+	} else {
+		//if there is no equivalent revision we create a new one
+		updateRevision, err = r.controllerHistory.CreateControllerRevision(cs, updateRevision, &collisionCount)
+		if err != nil {
+			return nil, nil, collisionCount, err
+		}
+	}
+
+	// attempt to find the revision that corresponds to the current revision
+	for i := range revisions {
+		if revisions[i].Name == cs.Status.CurrentRevision {
+			currentRevision = revisions[i]
+			break
+		}
+	}
+
+	// if the current revision is nil we initialize the history by setting it to the update revision
+	if currentRevision == nil {
+		currentRevision = updateRevision
+	}
+
+	return currentRevision, updateRevision, collisionCount, nil
+}
+
+func (r *ReconcileCloneSet) syncCloneSet(
+	instance *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus,
+	currentRevision, updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
+	filteredPods []*v1.Pod, filteredPVCs []*v1.PersistentVolumeClaim,
+) error {
+	if instance.DeletionTimestamp != nil {
+		return nil
+	}
+
+	// get the current and update revisions of the set.
+	currentSet, err := r.revisionControl.ApplyRevision(instance, currentRevision)
+	if err != nil {
+		return err
+	}
+	updateSet, err := r.revisionControl.ApplyRevision(instance, updateRevision)
+	if err != nil {
+		return err
+	}
+
+	var scaling bool
+	var podsScaleErr error
+	var podsUpdateErr error
+
+	scaling, podsScaleErr = r.syncControl.Scale(currentSet, updateSet, currentRevision.Name, updateRevision.Name, filteredPods, filteredPVCs)
+	if podsScaleErr != nil {
+		newStatus.Conditions = append(newStatus.Conditions, appsv1alpha1.CloneSetCondition{
+			Type:               appsv1alpha1.CloneSetConditionFailedScale,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Message:            podsScaleErr.Error(),
+		})
+		err = podsScaleErr
+	}
+	if scaling {
+		return podsScaleErr
+	}
+
+	podsUpdateErr = r.syncControl.Update(updateSet, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
+	if podsUpdateErr != nil {
+		newStatus.Conditions = append(newStatus.Conditions, appsv1alpha1.CloneSetCondition{
+			Type:               appsv1alpha1.CloneSetConditionFailedUpdate,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Message:            podsUpdateErr.Error(),
+		})
+		if err == nil {
+			err = podsUpdateErr
+		}
+	}
+
+	return err
+}
+
+// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read
+// and what is in the CloneSet.Spec
+func (r *ReconcileCloneSet) Reconcile(_ context.Context, request reconcile.Request) (reconcile.Result, error) {
+	return r.reconcileFunc(request)
+}
+
+// truncatePodsToDelete truncates any non-live pod names in spec.scaleStrategy.podsToDelete.
+func (r *ReconcileCloneSet) truncatePodsToDelete(cs *appsv1alpha1.CloneSet, pods []*v1.Pod) error {
+	if len(cs.Spec.ScaleStrategy.PodsToDelete) == 0 {
+		return nil
+	}
+
+	existingPods := sets.NewString()
+	for _, p := range pods {
+		existingPods.Insert(p.Name)
+	}
+
+	var newPodsToDelete []string
+	for _, podName := range cs.Spec.ScaleStrategy.PodsToDelete {
+		if existingPods.Has(podName) {
+			newPodsToDelete = append(newPodsToDelete, podName)
+		}
+	}
+
+	if len(newPodsToDelete) == len(cs.Spec.ScaleStrategy.PodsToDelete) {
+		return nil
+	}
+
+	newCS := cs.DeepCopy()
+	newCS.Spec.ScaleStrategy.PodsToDelete = newPodsToDelete
+	return r.Update(context.TODO(), newCS)
 }

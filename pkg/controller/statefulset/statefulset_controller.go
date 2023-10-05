@@ -23,6 +23,13 @@ import (
 	"fmt"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/event"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/features"
+	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
+	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
+
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,29 +47,23 @@ import (
 	"k8s.io/kubernetes/pkg/controller/history"
 	sigsclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	"github.com/openkruise/kruise/pkg/client"
 	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
 	kruiseappslisters "github.com/openkruise/kruise/pkg/client/listers/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/expectations"
-	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
-	"github.com/openkruise/kruise/pkg/util/requeueduration"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
+	requeueduration "github.com/openkruise/kruise/pkg/util/requeueduration"
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 func init() {
@@ -87,6 +88,34 @@ var (
 	// determined during controller initializing
 	isPreDownloadDisabled bool
 )
+
+var _ reconcile.Reconciler = &ReconcileStatefulSet{}
+
+// ReconcileStatefulSet reconciles a StatefulSet object
+type ReconcileStatefulSet struct {
+	// client interface
+	kruiseClient kruiseclientset.Interface
+	// control returns an interface capable of syncing a stateful set.
+	// Abstracted out for testing.
+	control StatefulSetControlInterface
+	// podControl is used for patching pods.
+	podControl kubecontroller.PodControlInterface
+	// podLister is able to list/get pods from a shared informer's store
+	podLister corelisters.PodLister
+	// setLister is able to list/get stateful sets from a shared informer's store
+	setLister kruiseappslisters.StatefulSetLister
+}
+
+// syncStatefulSet syncs a tuple of (statefulset, []*v1.Pod).
+func (ssc *ReconcileStatefulSet) syncStatefulSet(ctx context.Context, set *appsv1beta1.StatefulSet, pods []*v1.Pod) error {
+	klog.V(4).Infof("Syncing StatefulSet %v/%v with %d pods", set.Namespace, set.Name, len(pods))
+	// TODO: investigate where we mutate the set during the update as it is not obvious.    // 调查我们在更新期间在哪里改变了集合，因为它不明显。
+	if err := ssc.control.UpdateStatefulSet(ctx, set.DeepCopy(), pods); err != nil {
+		return err
+	} // 移除老旧reversion
+	klog.V(4).Infof("Successfully synced StatefulSet %s/%s", set.Namespace, set.Name)
+	return nil
+}
 
 // Add creates a new StatefulSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
@@ -160,35 +189,25 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 	}, nil
 }
 
-var _ reconcile.Reconciler = &ReconcileStatefulSet{}
-
-// ReconcileStatefulSet reconciles a StatefulSet object
-type ReconcileStatefulSet struct {
-	// client interface
-	kruiseClient kruiseclientset.Interface
-	// control returns an interface capable of syncing a stateful set.
-	// Abstracted out for testing.
-	control StatefulSetControlInterface
-	// podControl is used for patching pods.
-	podControl kubecontroller.PodControlInterface
-	// podLister is able to list/get pods from a shared informer's store
-	podLister corelisters.PodLister
-	// setLister is able to list/get stateful sets from a shared informer's store
-	setLister kruiseappslisters.StatefulSetLister
-}
-
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
 	c, err := controller.New("statefulset-controller", mgr, controller.Options{
-		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles, CacheSyncTimeout: util.GetControllerCacheSyncTimeout(),
-		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
+		Reconciler:              r,
+		MaxConcurrentReconciles: concurrentReconciles,
+		CacheSyncTimeout:        util.GetControllerCacheSyncTimeout(),
+		//RateLimiter: ratelimiter.DefaultControllerRateLimiter(),
+	})
 	if err != nil {
 		return err
 	}
 
 	// Watch for changes to StatefulSet
 	err = c.Watch(&source.Kind{Type: &appsv1beta1.StatefulSet{}}, &handler.EnqueueRequestForObject{}, predicate.Funcs{
+		CreateFunc: func(createEvent event.CreateEvent) bool {
+			fmt.Println(111)
+			return true
+		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldSS := e.ObjectOld.(*appsv1beta1.StatefulSet)
 			newSS := e.ObjectNew.(*appsv1beta1.StatefulSet)
@@ -232,7 +251,7 @@ func (ssc *ReconcileStatefulSet) Reconcile(ctx context.Context, request reconcil
 	key := request.NamespacedName.String()
 	namespace := request.Namespace
 	name := request.Name
-
+	fmt.Println(111111)
 	startTime := time.Now()
 	defer func() {
 		if retErr == nil {
@@ -264,11 +283,11 @@ func (ssc *ReconcileStatefulSet) Reconcile(ctx context.Context, request reconcil
 		return reconcile.Result{}, nil
 	}
 
-	if err := ssc.adoptOrphanRevisions(set); err != nil {
+	if err := ssc.adoptOrphanRevisions(set); err != nil { // 尝试将所有符合条件的 revision 的 owner 加上 statufulset
 		return reconcile.Result{}, err
 	}
 
-	pods, err := ssc.getPodsForStatefulSet(ctx, set, selector)
+	pods, err := ssc.getPodsForStatefulSet(ctx, set, selector) // 获取相应的pod
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -283,7 +302,7 @@ func (ssc *ReconcileStatefulSet) adoptOrphanRevisions(set *appsv1beta1.StatefulS
 	if err != nil {
 		return err
 	}
-	orphanRevisions := make([]*appsv1.ControllerRevision, 0)
+	orphanRevisions := make([]*appsv1.ControllerRevision, 0) // 孤儿 revision
 	for i := range revisions {
 		if metav1.GetControllerOf(revisions[i]) == nil {
 			orphanRevisions = append(orphanRevisions, revisions[i])
@@ -297,7 +316,7 @@ func (ssc *ReconcileStatefulSet) adoptOrphanRevisions(set *appsv1beta1.StatefulS
 		if fresh.UID != set.UID {
 			return fmt.Errorf("original StatefulSet %v/%v is gone: got uid %v, wanted %v", set.Namespace, set.Name, fresh.UID, set.UID)
 		}
-		return ssc.control.AdoptOrphanRevisions(set, orphanRevisions)
+		return ssc.control.AdoptOrphanRevisions(set, orphanRevisions) // 尝试将 revision 的 owner 加上 statufulset
 	}
 	return nil
 }
@@ -334,17 +353,7 @@ func (ssc *ReconcileStatefulSet) getPodsForStatefulSet(ctx context.Context, set 
 		return fresh, nil
 	})
 
-	cm := kubecontroller.NewPodControllerRefManager(ssc.podControl, set, selector, controllerKind, canAdoptFunc)
-	return cm.ClaimPods(ctx, pods, filter)
-}
-
-// syncStatefulSet syncs a tuple of (statefulset, []*v1.Pod).
-func (ssc *ReconcileStatefulSet) syncStatefulSet(ctx context.Context, set *appsv1beta1.StatefulSet, pods []*v1.Pod) error {
-	klog.V(4).Infof("Syncing StatefulSet %v/%v with %d pods", set.Namespace, set.Name, len(pods))
-	// TODO: investigate where we mutate the set during the update as it is not obvious.
-	if err := ssc.control.UpdateStatefulSet(ctx, set.DeepCopy(), pods); err != nil {
-		return err
-	}
-	klog.V(4).Infof("Successfully synced StatefulSet %s/%s", set.Namespace, set.Name)
-	return nil
+	// 简单来说，就是判断 uuid  owner deletetime
+	cm := kubecontroller.NewPodControllerRefManager(ssc.podControl, set, selector, controllerKind, canAdoptFunc) // 判断 pod 所属的所有 StatefulSets  是否与set uid 一致 且deletetime 为空
+	return cm.ClaimPods(ctx, pods, filter)                                                                       // 返回 pods 中 filter(pod) 为true 的列表
 }

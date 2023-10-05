@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	"github.com/openkruise/kruise/pkg/util"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -22,16 +23,6 @@ import (
 	"k8s.io/kubernetes/pkg/apis/core"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 )
-
-func (h *CloneSetCreateUpdateHandler) validateCloneSet(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
-	allErrs := apivalidation.ValidateObjectMeta(&cloneSet.ObjectMeta, true, apimachineryvalidation.NameIsDNSSubdomain, field.NewPath("metadata"))
-	var oldCloneSetSpec *appsv1alpha1.CloneSetSpec
-	if oldCloneSet != nil {
-		oldCloneSetSpec = &oldCloneSet.Spec
-	}
-	allErrs = append(allErrs, h.validateCloneSetSpec(&cloneSet.Spec, oldCloneSetSpec, &cloneSet.ObjectMeta, field.NewPath("spec"))...)
-	return allErrs
-}
 
 func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec, oldSpec *appsv1alpha1.CloneSetSpec, metadata *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
@@ -183,8 +174,10 @@ func (h *CloneSetCreateUpdateHandler) validateUpdateStrategy(strategy *appsv1alp
 	return allErrs
 }
 
+// --------------------------------------------------------------------------------------------------------------------
+
 func (h *CloneSetCreateUpdateHandler) validateCloneSetUpdate(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
-	allErrs := apivalidation.ValidateObjectMetaUpdate(&cloneSet.ObjectMeta, &oldCloneSet.ObjectMeta, field.NewPath("metadata"))
+	allErrs := apivalidation.ValidateObjectMetaUpdate(&cloneSet.ObjectMeta, &oldCloneSet.ObjectMeta, field.NewPath("metadata")) // metadata 不能变
 
 	clone := cloneSet.DeepCopy()
 	clone.Spec.Replicas = oldCloneSet.Spec.Replicas
@@ -205,5 +198,14 @@ func (h *CloneSetCreateUpdateHandler) validateCloneSetUpdate(cloneSet, oldCloneS
 	}
 
 	allErrs = append(allErrs, h.validateCloneSet(cloneSet, oldCloneSet)...)
+	return allErrs
+}
+func (h *CloneSetCreateUpdateHandler) validateCloneSet(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
+	allErrs := apivalidation.ValidateObjectMeta(&cloneSet.ObjectMeta, true, apimachineryvalidation.NameIsDNSSubdomain, field.NewPath("metadata"))
+	var oldCloneSetSpec *appsv1alpha1.CloneSetSpec
+	if oldCloneSet != nil {
+		oldCloneSetSpec = &oldCloneSet.Spec
+	}
+	allErrs = append(allErrs, h.validateCloneSetSpec(&cloneSet.Spec, oldCloneSetSpec, &cloneSet.ObjectMeta, field.NewPath("spec"))...)
 	return allErrs
 }

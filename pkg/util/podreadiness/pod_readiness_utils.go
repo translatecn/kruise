@@ -21,12 +21,99 @@ import (
 
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/podadapter"
+	podadapter "github.com/openkruise/kruise/pkg/util/podadapter"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 )
 
+func addMessage(base string, msg Message) (bool, messageList) {
+	messages := messageList{}
+	if base != "" {
+		_ = json.Unmarshal([]byte(base), &messages)
+	}
+	for _, m := range messages {
+		if m.UserAgent == msg.UserAgent && m.Key == msg.Key {
+			return false, messages
+		}
+	}
+	messages = append(messages, msg)
+	return true, messages
+}
+
+func GetReadinessCondition(pod *v1.Pod) *v1.PodCondition {
+	return getReadinessCondition(pod, appspub.KruisePodReadyConditionType)
+}
+
+func ContainsReadinessGate(pod *v1.Pod) bool {
+	return containsReadinessGate(pod, appspub.KruisePodReadyConditionType)
+}
+
+func getReadinessCondition(pod *v1.Pod, condType v1.PodConditionType) *v1.PodCondition {
+	if pod == nil {
+		return nil
+	}
+	for i := range pod.Status.Conditions {
+		c := &pod.Status.Conditions[i]
+		if c.Type == condType {
+			return c
+		}
+	}
+	return nil
+}
+
+func containsReadinessGate(pod *v1.Pod, condType v1.PodConditionType) bool {
+	for _, g := range pod.Spec.ReadinessGates {
+		if g.ConditionType == condType {
+			return true
+		}
+	}
+	return false
+}
+
+func removeMessage(base string, msg Message) (bool, messageList) {
+	messages := messageList{}
+	if base != "" {
+		_ = json.Unmarshal([]byte(base), &messages)
+	}
+	var removed bool
+	newMessages := messageList{}
+	for _, m := range messages {
+		if m.UserAgent == msg.UserAgent && m.Key == msg.Key {
+			removed = true
+			continue
+		}
+		newMessages = append(newMessages, m)
+	}
+	return removed, newMessages
+}
+func removeNotReadyKey(adp podadapter.Adapter, pod *v1.Pod, msg Message, condType v1.PodConditionType) error {
+	if !containsReadinessGate(pod, condType) {
+		return nil
+	}
+
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		newPod, err := adp.GetPod(pod.Namespace, pod.Name)
+		if err != nil {
+			return err
+		}
+
+		condition := getReadinessCondition(newPod, condType)
+		if condition == nil {
+			return nil
+		}
+		changed, messages := removeMessage(condition.Message, msg)
+		if !changed {
+			return nil
+		}
+		if len(messages) == 0 {
+			condition.Status = v1.ConditionTrue
+		}
+		condition.Message = messages.dump()
+		condition.LastTransitionTime = metav1.Now()
+		return adp.UpdatePodStatus(newPod)
+	})
+}
 func addNotReadyKey(adp podadapter.Adapter, pod *v1.Pod, msg Message, condType v1.PodConditionType) error {
 	if alreadyHasKey(pod, msg, condType) {
 		return nil
@@ -65,95 +152,6 @@ func addNotReadyKey(adp podadapter.Adapter, pod *v1.Pod, msg Message, condType v
 		return adp.UpdatePodStatus(newPod)
 	})
 	return err
-}
-
-func removeNotReadyKey(adp podadapter.Adapter, pod *v1.Pod, msg Message, condType v1.PodConditionType) error {
-	if !containsReadinessGate(pod, condType) {
-		return nil
-	}
-
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		newPod, err := adp.GetPod(pod.Namespace, pod.Name)
-		if err != nil {
-			return err
-		}
-
-		condition := getReadinessCondition(newPod, condType)
-		if condition == nil {
-			return nil
-		}
-		changed, messages := removeMessage(condition.Message, msg)
-		if !changed {
-			return nil
-		}
-		if len(messages) == 0 {
-			condition.Status = v1.ConditionTrue
-		}
-		condition.Message = messages.dump()
-		condition.LastTransitionTime = metav1.Now()
-		return adp.UpdatePodStatus(newPod)
-	})
-}
-
-func addMessage(base string, msg Message) (bool, messageList) {
-	messages := messageList{}
-	if base != "" {
-		_ = json.Unmarshal([]byte(base), &messages)
-	}
-	for _, m := range messages {
-		if m.UserAgent == msg.UserAgent && m.Key == msg.Key {
-			return false, messages
-		}
-	}
-	messages = append(messages, msg)
-	return true, messages
-}
-
-func removeMessage(base string, msg Message) (bool, messageList) {
-	messages := messageList{}
-	if base != "" {
-		_ = json.Unmarshal([]byte(base), &messages)
-	}
-	var removed bool
-	newMessages := messageList{}
-	for _, m := range messages {
-		if m.UserAgent == msg.UserAgent && m.Key == msg.Key {
-			removed = true
-			continue
-		}
-		newMessages = append(newMessages, m)
-	}
-	return removed, newMessages
-}
-
-func GetReadinessCondition(pod *v1.Pod) *v1.PodCondition {
-	return getReadinessCondition(pod, appspub.KruisePodReadyConditionType)
-}
-
-func ContainsReadinessGate(pod *v1.Pod) bool {
-	return containsReadinessGate(pod, appspub.KruisePodReadyConditionType)
-}
-
-func getReadinessCondition(pod *v1.Pod, condType v1.PodConditionType) *v1.PodCondition {
-	if pod == nil {
-		return nil
-	}
-	for i := range pod.Status.Conditions {
-		c := &pod.Status.Conditions[i]
-		if c.Type == condType {
-			return c
-		}
-	}
-	return nil
-}
-
-func containsReadinessGate(pod *v1.Pod, condType v1.PodConditionType) bool {
-	for _, g := range pod.Spec.ReadinessGates {
-		if g.ConditionType == condType {
-			return true
-		}
-	}
-	return false
 }
 
 func alreadyHasKey(pod *v1.Pod, msg Message, condType v1.PodConditionType) bool {

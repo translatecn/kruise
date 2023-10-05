@@ -22,6 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	kruiseappsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruiseappsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
@@ -29,10 +32,8 @@ import (
 	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"

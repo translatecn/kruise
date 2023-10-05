@@ -22,7 +22,7 @@ import (
 	"net/http"
 
 	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,27 +65,30 @@ func (h *PodCreateHandler) Handle(ctx context.Context, req admission.Request) ad
 		changed = true
 	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.WorkloadSpread) {
-		if skip, err := h.workloadSpreadMutatingPod(ctx, req, obj); err != nil {
+	{
+		if utilfeature.DefaultFeatureGate.Enabled(features.WorkloadSpread) {
+			if skip, err := h.workloadSpreadMutatingPod(ctx, req, obj); err != nil {
+				return admission.Errored(http.StatusInternalServerError, err)
+			} else if !skip {
+				changed = true
+			}
+		}
+	}
+	{
+		if skip, err := h.sidecarsetMutatingPod(ctx, req, obj); err != nil {
 			return admission.Errored(http.StatusInternalServerError, err)
 		} else if !skip {
 			changed = true
 		}
 	}
-
-	if skip, err := h.sidecarsetMutatingPod(ctx, req, obj); err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	} else if !skip {
-		changed = true
+	{
+		// "the order matters and sidecarsetMutatingPod must precede containerLaunchPriorityInitialization"
+		if skip, err := h.containerLaunchPriorityInitialization(ctx, req, obj); err != nil {
+			return admission.Errored(http.StatusInternalServerError, err)
+		} else if !skip {
+			changed = true
+		}
 	}
-
-	// "the order matters and sidecarsetMutatingPod must precede containerLaunchPriorityInitialization"
-	if skip, err := h.containerLaunchPriorityInitialization(ctx, req, obj); err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	} else if !skip {
-		changed = true
-	}
-
 	// patch related-pub annotation in pod
 	if utilfeature.DefaultFeatureGate.Enabled(features.PodUnavailableBudgetUpdateGate) ||
 		utilfeature.DefaultFeatureGate.Enabled(features.PodUnavailableBudgetDeleteGate) {

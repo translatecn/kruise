@@ -32,9 +32,9 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/specifieddelete"
-	"github.com/openkruise/kruise/pkg/util/updatesort"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
+	specifieddelete "github.com/openkruise/kruise/pkg/util/specifieddelete"
+	updatesort "github.com/openkruise/kruise/pkg/util/updatesort"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +42,126 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// fix the pod-template-hash label for old pods before v1.1
+func (c *realControl) fixPodTemplateHashLabel(cs *appsv1alpha1.CloneSet, pod *v1.Pod) (bool, error) {
+	if _, exists := pod.Labels[apps.DefaultDeploymentUniqueLabelKey]; exists {
+		return false, nil
+	}
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
+		apps.DefaultDeploymentUniqueLabelKey,
+		clonesetutils.GetShortHash(pod.Labels[apps.ControllerRevisionHashLabelKey])))
+	pod = pod.DeepCopy()
+	if err := c.Patch(context.TODO(), pod, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
+		klog.Warningf("CloneSet %s/%s failed to fix pod-template-hash to Pod %s: %v", cs.Namespace, cs.Name, pod.Name, err)
+		return false, err
+	}
+	clonesetutils.ResourceVersionExpectations.Expect(pod)
+	return true, nil
+}
+
+// limitUpdateIndexes limits all pods waiting update by the maxUnavailable policy, and returns the indexes of pods that can finally update
+func limitUpdateIndexes(coreControl clonesetcore.Control, minReadySeconds int32, diffRes expectationDiffs, waitUpdateIndexes []int, pods []*v1.Pod, targetRevisionHash string) []int {
+	updateDiff := util.IntAbs(diffRes.updateNum)
+	if updateDiff < len(waitUpdateIndexes) {
+		waitUpdateIndexes = waitUpdateIndexes[:updateDiff]
+	}
+
+	var unavailableCount, targetRevisionUnavailableCount, canUpdateCount int
+	for _, p := range pods {
+		if !IsPodAvailable(coreControl, p, minReadySeconds) {
+			unavailableCount++
+			if clonesetutils.EqualToRevisionHash("", p, targetRevisionHash) {
+				targetRevisionUnavailableCount++
+			}
+		}
+	}
+	for _, i := range waitUpdateIndexes {
+		// Make sure unavailable pods in target revision should not be more than maxUnavailable.
+		if targetRevisionUnavailableCount+canUpdateCount >= diffRes.updateMaxUnavailable {
+			break
+		}
+
+		// Make sure unavailable pods in all revisions should not be more than maxUnavailable.
+		// Note that update an old pod that already be unavailable will not increase the unavailable number.
+		if IsPodAvailable(coreControl, pods[i], minReadySeconds) {
+			if unavailableCount >= diffRes.updateMaxUnavailable {
+				break
+			}
+			unavailableCount++
+		}
+		canUpdateCount++
+	}
+
+	if canUpdateCount < len(waitUpdateIndexes) {
+		waitUpdateIndexes = waitUpdateIndexes[:canUpdateCount]
+	}
+	return waitUpdateIndexes
+}
+
+func (c *realControl) refreshPodState(cs *appsv1alpha1.CloneSet, coreControl clonesetcore.Control, pod *v1.Pod, updateRevision string) (bool, time.Duration, error) {
+	opts := coreControl.GetUpdateOptions()
+	opts = inplaceupdate.SetOptionsDefaults(opts)
+
+	res := c.inplaceControl.Refresh(pod, opts)
+	if res.RefreshErr != nil {
+		klog.Errorf("CloneSet %s/%s failed to update pod %s condition for inplace: %v",
+			cs.Namespace, cs.Name, pod.Name, res.RefreshErr)
+		return false, 0, res.RefreshErr
+	}
+
+	var state appspub.LifecycleStateType
+	switch lifecycle.GetPodLifecycleState(pod) { // lifecycle.apps.kruise.io/state
+	case appspub.LifecycleStatePreparingNormal: // 刚创建时
+		if cs.Spec.Lifecycle == nil ||
+			cs.Spec.Lifecycle.PreNormal == nil ||
+			lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.PreNormal, pod) {
+			state = appspub.LifecycleStateNormal
+		}
+	case appspub.LifecycleStatePreparingUpdate:
+		// when pod updated to PreparingUpdate state to wait lifecycle blocker to remove,
+		// then rollback, do not need update pod inplace since it is the update revision,
+		// so just update pod lifecycle state. ref: https://github.com/openkruise/kruise/issues/1156
+		if clonesetutils.EqualToRevisionHash("", pod, updateRevision) { // 比较 pod label crontaller-version  == updateRevision
+			if cs.Spec.Lifecycle != nil && !lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
+				state = appspub.LifecycleStateUpdated
+			} else {
+				state = appspub.LifecycleStateNormal
+			}
+		}
+	case appspub.LifecycleStateUpdating:
+		if opts.CheckPodUpdateCompleted(pod) == nil {
+			_ = inplaceupdate.DefaultCheckInPlaceUpdateCompleted
+			if cs.Spec.Lifecycle != nil && !lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
+				state = appspub.LifecycleStateUpdated
+			} else {
+				state = appspub.LifecycleStateNormal
+			}
+		}
+	case appspub.LifecycleStateUpdated:
+		if cs.Spec.Lifecycle == nil ||
+			cs.Spec.Lifecycle.InPlaceUpdate == nil ||
+			lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
+			state = appspub.LifecycleStateNormal
+		}
+	}
+
+	if state != "" {
+		var markPodNotReady bool
+		if cs.Spec.Lifecycle != nil && cs.Spec.Lifecycle.InPlaceUpdate != nil {
+			markPodNotReady = cs.Spec.Lifecycle.InPlaceUpdate.MarkPodNotReady
+		}
+		if updated, gotPod, err := c.lifecycleControl.UpdatePodLifecycle(pod, state, markPodNotReady); err != nil {
+			return false, 0, err
+		} else if updated {
+			clonesetutils.ResourceVersionExpectations.Expect(gotPod)
+			klog.V(3).Infof("CloneSet %s update pod %s lifecycle to %s", clonesetutils.GetControllerKey(cs), pod.Name, state)
+			return true, res.DelayDuration, nil
+		}
+	}
+
+	return false, res.DelayDuration, nil
+}
 
 func (c *realControl) Update(cs *appsv1alpha1.CloneSet,
 	currentRevision, updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
@@ -90,11 +210,9 @@ func (c *realControl) Update(cs *appsv1alpha1.CloneSet,
 	}
 	var waitUpdateIndexes []int
 	for i, pod := range pods {
-		if coreControl.IsPodUpdatePaused(pod) {
-			continue
-		}
 
-		var waitUpdate, canUpdate bool
+		var waitUpdate bool // 需要更新
+		var canUpdate bool  // 当前这一阶段可不可以更新
 		if diffRes.updateNum > 0 {
 			waitUpdate = !clonesetutils.EqualToRevisionHash("", pod, updateRevision.Name)
 		} else {
@@ -154,87 +272,6 @@ func (c *realControl) Update(cs *appsv1alpha1.CloneSet,
 
 	return nil
 }
-
-func (c *realControl) refreshPodState(cs *appsv1alpha1.CloneSet, coreControl clonesetcore.Control, pod *v1.Pod, updateRevision string) (bool, time.Duration, error) {
-	opts := coreControl.GetUpdateOptions()
-	opts = inplaceupdate.SetOptionsDefaults(opts)
-
-	res := c.inplaceControl.Refresh(pod, opts)
-	if res.RefreshErr != nil {
-		klog.Errorf("CloneSet %s/%s failed to update pod %s condition for inplace: %v",
-			cs.Namespace, cs.Name, pod.Name, res.RefreshErr)
-		return false, 0, res.RefreshErr
-	}
-
-	var state appspub.LifecycleStateType
-	switch lifecycle.GetPodLifecycleState(pod) {
-	case appspub.LifecycleStatePreparingNormal:
-		if cs.Spec.Lifecycle == nil ||
-			cs.Spec.Lifecycle.PreNormal == nil ||
-			lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.PreNormal, pod) {
-			state = appspub.LifecycleStateNormal
-		}
-	case appspub.LifecycleStatePreparingUpdate:
-		// when pod updated to PreparingUpdate state to wait lifecycle blocker to remove,
-		// then rollback, do not need update pod inplace since it is the update revision,
-		// so just update pod lifecycle state. ref: https://github.com/openkruise/kruise/issues/1156
-		if clonesetutils.EqualToRevisionHash("", pod, updateRevision) {
-			if cs.Spec.Lifecycle != nil && !lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
-				state = appspub.LifecycleStateUpdated
-			} else {
-				state = appspub.LifecycleStateNormal
-			}
-		}
-	case appspub.LifecycleStateUpdating:
-		if opts.CheckPodUpdateCompleted(pod) == nil {
-			if cs.Spec.Lifecycle != nil && !lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
-				state = appspub.LifecycleStateUpdated
-			} else {
-				state = appspub.LifecycleStateNormal
-			}
-		}
-	case appspub.LifecycleStateUpdated:
-		if cs.Spec.Lifecycle == nil ||
-			cs.Spec.Lifecycle.InPlaceUpdate == nil ||
-			lifecycle.IsPodAllHooked(cs.Spec.Lifecycle.InPlaceUpdate, pod) {
-			state = appspub.LifecycleStateNormal
-		}
-	}
-
-	if state != "" {
-		var markPodNotReady bool
-		if cs.Spec.Lifecycle != nil && cs.Spec.Lifecycle.InPlaceUpdate != nil {
-			markPodNotReady = cs.Spec.Lifecycle.InPlaceUpdate.MarkPodNotReady
-		}
-		if updated, gotPod, err := c.lifecycleControl.UpdatePodLifecycle(pod, state, markPodNotReady); err != nil {
-			return false, 0, err
-		} else if updated {
-			clonesetutils.ResourceVersionExpectations.Expect(gotPod)
-			klog.V(3).Infof("CloneSet %s update pod %s lifecycle to %s", clonesetutils.GetControllerKey(cs), pod.Name, state)
-			return true, res.DelayDuration, nil
-		}
-	}
-
-	return false, res.DelayDuration, nil
-}
-
-// fix the pod-template-hash label for old pods before v1.1
-func (c *realControl) fixPodTemplateHashLabel(cs *appsv1alpha1.CloneSet, pod *v1.Pod) (bool, error) {
-	if _, exists := pod.Labels[apps.DefaultDeploymentUniqueLabelKey]; exists {
-		return false, nil
-	}
-	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
-		apps.DefaultDeploymentUniqueLabelKey,
-		clonesetutils.GetShortHash(pod.Labels[apps.ControllerRevisionHashLabelKey])))
-	pod = pod.DeepCopy()
-	if err := c.Patch(context.TODO(), pod, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
-		klog.Warningf("CloneSet %s/%s failed to fix pod-template-hash to Pod %s: %v", cs.Namespace, cs.Name, pod.Name, err)
-		return false, err
-	}
-	clonesetutils.ResourceVersionExpectations.Expect(pod)
-	return true, nil
-}
-
 func (c *realControl) updatePod(cs *appsv1alpha1.CloneSet, coreControl clonesetcore.Control,
 	updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
 	pod *v1.Pod, pvcs []*v1.PersistentVolumeClaim,
@@ -249,7 +286,7 @@ func (c *realControl) updatePod(cs *appsv1alpha1.CloneSet, coreControl clonesetc
 				break
 			}
 		}
-
+		// 检查是否只有 image 改变了
 		if c.inplaceControl.CanUpdateInPlace(oldRevision, updateRevision, coreControl.GetUpdateOptions()) {
 			switch state := lifecycle.GetPodLifecycleState(pod); state {
 			case "", appspub.LifecycleStatePreparingNormal, appspub.LifecycleStateNormal:
@@ -345,44 +382,5 @@ func SortUpdateIndexes(coreControl clonesetcore.Control, strategy appsv1alpha1.C
 		}
 		return false
 	})
-	return waitUpdateIndexes
-}
-
-// limitUpdateIndexes limits all pods waiting update by the maxUnavailable policy, and returns the indexes of pods that can finally update
-func limitUpdateIndexes(coreControl clonesetcore.Control, minReadySeconds int32, diffRes expectationDiffs, waitUpdateIndexes []int, pods []*v1.Pod, targetRevisionHash string) []int {
-	updateDiff := util.IntAbs(diffRes.updateNum)
-	if updateDiff < len(waitUpdateIndexes) {
-		waitUpdateIndexes = waitUpdateIndexes[:updateDiff]
-	}
-
-	var unavailableCount, targetRevisionUnavailableCount, canUpdateCount int
-	for _, p := range pods {
-		if !IsPodAvailable(coreControl, p, minReadySeconds) {
-			unavailableCount++
-			if clonesetutils.EqualToRevisionHash("", p, targetRevisionHash) {
-				targetRevisionUnavailableCount++
-			}
-		}
-	}
-	for _, i := range waitUpdateIndexes {
-		// Make sure unavailable pods in target revision should not be more than maxUnavailable.
-		if targetRevisionUnavailableCount+canUpdateCount >= diffRes.updateMaxUnavailable {
-			break
-		}
-
-		// Make sure unavailable pods in all revisions should not be more than maxUnavailable.
-		// Note that update an old pod that already be unavailable will not increase the unavailable number.
-		if IsPodAvailable(coreControl, pods[i], minReadySeconds) {
-			if unavailableCount >= diffRes.updateMaxUnavailable {
-				break
-			}
-			unavailableCount++
-		}
-		canUpdateCount++
-	}
-
-	if canUpdateCount < len(waitUpdateIndexes) {
-		waitUpdateIndexes = waitUpdateIndexes[:canUpdateCount]
-	}
 	return waitUpdateIndexes
 }

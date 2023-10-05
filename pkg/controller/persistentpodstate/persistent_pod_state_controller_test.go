@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -154,10 +156,10 @@ var (
 
 func init() {
 	scheme = runtime.NewScheme()
-	_ = appsv1alpha1.AddToScheme(scheme)
-	_ = corev1.AddToScheme(scheme)
-	_ = appsv1.AddToScheme(scheme)
-	_ = appsv1beta1.AddToScheme(scheme)
+	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(corev1.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(appsv1beta1.AddToScheme(scheme))
 }
 
 func TestReconcilePersistentPodState(t *testing.T) {

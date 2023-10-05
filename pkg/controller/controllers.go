@@ -23,8 +23,6 @@ import (
 	containerlauchpriority "github.com/openkruise/kruise/pkg/controller/containerlaunchpriority"
 	"github.com/openkruise/kruise/pkg/controller/containerrecreaterequest"
 	"github.com/openkruise/kruise/pkg/controller/daemonset"
-	"github.com/openkruise/kruise/pkg/controller/ephemeraljob"
-	"github.com/openkruise/kruise/pkg/controller/imagelistpulljob"
 	"github.com/openkruise/kruise/pkg/controller/imagepulljob"
 	"github.com/openkruise/kruise/pkg/controller/nodeimage"
 	"github.com/openkruise/kruise/pkg/controller/nodepodprobe"
@@ -60,13 +58,14 @@ func init() {
 	controllerAddFuncs = append(controllerAddFuncs, podunavailablebudget.Add)
 	controllerAddFuncs = append(controllerAddFuncs, workloadspread.Add)
 	controllerAddFuncs = append(controllerAddFuncs, resourcedistribution.Add)
-	controllerAddFuncs = append(controllerAddFuncs, ephemeraljob.Add)
+	//controllerAddFuncs = append(controllerAddFuncs, ephemeraljob.Add)
 	controllerAddFuncs = append(controllerAddFuncs, containerlauchpriority.Add)
 	controllerAddFuncs = append(controllerAddFuncs, persistentpodstate.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sidecarterminator.Add)
 	controllerAddFuncs = append(controllerAddFuncs, podprobemarker.Add)
 	controllerAddFuncs = append(controllerAddFuncs, nodepodprobe.Add)
-	controllerAddFuncs = append(controllerAddFuncs, imagelistpulljob.Add)
+	//controllerAddFuncs = append(controllerAddFuncs, imagelistpulljob.Add)
+	controllerAddFuncs = append(controllerAddFuncs, sidecarterminator.Add)
+
 }
 
 func SetupWithManager(m manager.Manager) error {

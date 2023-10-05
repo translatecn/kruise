@@ -44,15 +44,65 @@ type commonControl struct {
 
 var _ Control = &commonControl{}
 
-func (c *commonControl) IsInitializing() bool {
+func (c *commonControl) ExtraStatusCalculation(status *appsv1alpha1.CloneSetStatus, pods []*v1.Pod) error {
+	return nil
+}
+
+func containersUpdateCompleted(pod *v1.Pod, checkFunc func(pod *v1.Pod, state *appspub.InPlaceUpdateState) error) error {
+	if stateStr, ok := appspub.GetInPlaceUpdateState(pod); ok {
+		state := appspub.InPlaceUpdateState{}
+		if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
+			return err
+		}
+		return checkFunc(pod, &state)
+	}
+	return fmt.Errorf("pod %v has no in-place update state annotation", klog.KObj(pod))
+}
+
+func lifecycleFinalizerChanged(cs *appsv1alpha1.CloneSet, oldPod, curPod *v1.Pod) bool {
+	if cs.Spec.Lifecycle == nil {
+		return false
+	}
+
+	if cs.Spec.Lifecycle.PreDelete != nil {
+		for _, f := range cs.Spec.Lifecycle.PreDelete.FinalizersHandler {
+			if controllerutil.ContainsFinalizer(oldPod, f) != controllerutil.ContainsFinalizer(curPod, f) {
+				return true
+			}
+		}
+	}
+
+	if cs.Spec.Lifecycle.InPlaceUpdate != nil {
+		for _, f := range cs.Spec.Lifecycle.InPlaceUpdate.FinalizersHandler {
+			if controllerutil.ContainsFinalizer(oldPod, f) != controllerutil.ContainsFinalizer(curPod, f) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
-func (c *commonControl) SetRevisionTemplate(revisionSpec map[string]interface{}, template map[string]interface{}) {
-	revisionSpec["template"] = template
-	template["$patch"] = "replace"
-}
+func (c *commonControl) ValidateCloneSetUpdate(oldCS, newCS *appsv1alpha1.CloneSet) error {
+	if newCS.Spec.UpdateStrategy.Type != appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType {
+		return nil
+	}
 
+	oldTempJSON, _ := json.Marshal(oldCS.Spec.Template.Spec)
+	newTempJSON, _ := json.Marshal(newCS.Spec.Template.Spec)
+	patches, err := jsonpatch.CreatePatch(oldTempJSON, newTempJSON)
+	if err != nil {
+		return fmt.Errorf("failed calculate patches between old/new template spec")
+	}
+
+	for _, p := range patches {
+		if p.Operation != "replace" || !inPlaceUpdateTemplateSpecPatchRexp.MatchString(p.Path) {
+			return fmt.Errorf("only allowed to update images in spec for %s, but found %s %s",
+				appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType, p.Operation, p.Path)
+		}
+	}
+	return nil
+}
 func (c *commonControl) ApplyRevisionPatch(patched []byte) (*appsv1alpha1.CloneSet, error) {
 	restoredSet := &appsv1alpha1.CloneSet{}
 	if err := json.Unmarshal(patched, restoredSet); err != nil {
@@ -61,7 +111,14 @@ func (c *commonControl) ApplyRevisionPatch(patched []byte) (*appsv1alpha1.CloneS
 	return restoredSet, nil
 }
 
-func (c *commonControl) IsReadyToScale() bool {
+func (c *commonControl) IsPodUpdateReady(pod *v1.Pod, minReadySeconds int32) bool {
+	if !clonesetutils.IsRunningAndAvailable(pod, minReadySeconds) {
+		return false
+	}
+	condition := inplaceupdate.GetCondition(pod)
+	if condition != nil && condition.Status != v1.ConditionTrue {
+		return false
+	}
 	return true
 }
 
@@ -110,24 +167,29 @@ func (c *commonControl) newVersionedPods(cs *appsv1alpha1.CloneSet, revision str
 func (c *commonControl) GetPodSpreadConstraint() []clonesetutils.PodSpreadConstraint {
 	var constraints []clonesetutils.PodSpreadConstraint
 	for _, c := range c.Spec.Template.Spec.TopologySpreadConstraints {
-		constraints = append(constraints, clonesetutils.PodSpreadConstraint{TopologyKey: c.TopologyKey})
+		constraints = append(constraints, clonesetutils.PodSpreadConstraint{
+			TopologyKey:   c.TopologyKey,
+			LimitedValues: nil,
+		})
 	}
 	return constraints
 }
 
-func (c *commonControl) IsPodUpdatePaused(pod *v1.Pod) bool {
+func (c *commonControl) IsInitializing() bool {
 	return false
 }
 
-func (c *commonControl) IsPodUpdateReady(pod *v1.Pod, minReadySeconds int32) bool {
-	if !clonesetutils.IsRunningAndAvailable(pod, minReadySeconds) {
-		return false
-	}
-	condition := inplaceupdate.GetCondition(pod)
-	if condition != nil && condition.Status != v1.ConditionTrue {
-		return false
-	}
+func (c *commonControl) SetRevisionTemplate(revisionSpec map[string]interface{}, template map[string]interface{}) {
+	revisionSpec["template"] = template
+	template["$patch"] = "replace"
+}
+
+func (c *commonControl) IsReadyToScale() bool {
 	return true
+}
+
+func (c *commonControl) IsPodUpdatePaused(pod *v1.Pod) bool {
+	return false
 }
 
 func (c *commonControl) GetPodsSortFunc(pods []*v1.Pod, waitUpdateIndexes []int) func(i, j int) bool {
@@ -143,31 +205,6 @@ func (c *commonControl) GetUpdateOptions() *inplaceupdate.UpdateOptions {
 		opts.GracePeriodSeconds = c.Spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds
 	}
 	return opts
-}
-
-func (c *commonControl) ValidateCloneSetUpdate(oldCS, newCS *appsv1alpha1.CloneSet) error {
-	if newCS.Spec.UpdateStrategy.Type != appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType {
-		return nil
-	}
-
-	oldTempJSON, _ := json.Marshal(oldCS.Spec.Template.Spec)
-	newTempJSON, _ := json.Marshal(newCS.Spec.Template.Spec)
-	patches, err := jsonpatch.CreatePatch(oldTempJSON, newTempJSON)
-	if err != nil {
-		return fmt.Errorf("failed calculate patches between old/new template spec")
-	}
-
-	for _, p := range patches {
-		if p.Operation != "replace" || !inPlaceUpdateTemplateSpecPatchRexp.MatchString(p.Path) {
-			return fmt.Errorf("only allowed to update images in spec for %s, but found %s %s",
-				appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType, p.Operation, p.Path)
-		}
-	}
-	return nil
-}
-
-func (c *commonControl) ExtraStatusCalculation(status *appsv1alpha1.CloneSetStatus, pods []*v1.Pod) error {
-	return nil
 }
 
 func (c *commonControl) IgnorePodUpdateEvent(oldPod, curPod *v1.Pod) bool {
@@ -207,39 +244,4 @@ func (c *commonControl) IgnorePodUpdateEvent(oldPod, curPod *v1.Pod) bool {
 	}
 
 	return true
-}
-
-func containersUpdateCompleted(pod *v1.Pod, checkFunc func(pod *v1.Pod, state *appspub.InPlaceUpdateState) error) error {
-	if stateStr, ok := appspub.GetInPlaceUpdateState(pod); ok {
-		state := appspub.InPlaceUpdateState{}
-		if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
-			return err
-		}
-		return checkFunc(pod, &state)
-	}
-	return fmt.Errorf("pod %v has no in-place update state annotation", klog.KObj(pod))
-}
-
-func lifecycleFinalizerChanged(cs *appsv1alpha1.CloneSet, oldPod, curPod *v1.Pod) bool {
-	if cs.Spec.Lifecycle == nil {
-		return false
-	}
-
-	if cs.Spec.Lifecycle.PreDelete != nil {
-		for _, f := range cs.Spec.Lifecycle.PreDelete.FinalizersHandler {
-			if controllerutil.ContainsFinalizer(oldPod, f) != controllerutil.ContainsFinalizer(curPod, f) {
-				return true
-			}
-		}
-	}
-
-	if cs.Spec.Lifecycle.InPlaceUpdate != nil {
-		for _, f := range cs.Spec.Lifecycle.InPlaceUpdate.FinalizersHandler {
-			if controllerutil.ContainsFinalizer(oldPod, f) != controllerutil.ContainsFinalizer(curPod, f) {
-				return true
-			}
-		}
-	}
-
-	return false
 }

@@ -22,9 +22,11 @@ import (
 	"reflect"
 	"testing"
 
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/configuration"
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,7 +36,7 @@ import (
 
 func init() {
 	sch = runtime.NewScheme()
-	_ = corev1.AddToScheme(sch)
+	utilruntime.Must(corev1.AddToScheme(sch))
 }
 
 var (

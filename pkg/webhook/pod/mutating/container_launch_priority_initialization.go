@@ -53,6 +53,7 @@ func (h *PodCreateHandler) containerLaunchPriorityInitialization(ctx context.Con
 func (h *PodCreateHandler) getPriority(pod *corev1.Pod) ([]int, bool, error) {
 	var priorityFlag bool
 	var priority = make([]int, len(pod.Spec.Containers))
+
 	for i, c := range pod.Spec.Containers {
 		for _, e := range c.Env {
 			if e.Name == appspub.ContainerLaunchPriorityEnvName {
@@ -80,7 +81,6 @@ func (h *PodCreateHandler) getPriority(pod *corev1.Pod) ([]int, bool, error) {
 	}
 	return priority, priorityFlag, nil
 }
-
 func (h *PodCreateHandler) setPodEnv(priority []int, pod *corev1.Pod) {
 	// Generate name for pods that only have generateName field
 	if len(pod.Name) == 0 && len(pod.GenerateName) > 0 {

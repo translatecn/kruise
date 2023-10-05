@@ -17,7 +17,7 @@ limitations under the License.
 package webhook
 
 import (
-	"github.com/openkruise/kruise/pkg/webhook/customresourcedefinition/validating"
+	"github.com/openkruise/kruise/pkg/webhook/delete_customresourcedefinition/validating"
 )
 
 func init() {

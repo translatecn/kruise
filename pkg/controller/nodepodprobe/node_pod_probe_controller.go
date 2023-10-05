@@ -22,14 +22,15 @@ import (
 	"reflect"
 	"strings"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,7 +64,9 @@ var (
 // Add creates a new NodePodProbe Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !utildiscovery.DiscoverGVK(controllerKind) || !utilfeature.DefaultFeatureGate.Enabled(features.PodProbeMarkerGate) {
+	if !utildiscovery.DiscoverGVK(controllerKind) ||
+		!utilfeature.DefaultFeatureGate.Enabled(features.PodProbeMarkerGate) ||
+		!utilfeature.DefaultFeatureGate.Enabled(features.KruiseDaemon) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -124,7 +127,7 @@ type ReconcileNodePodProbe struct {
 // Reconcile reads that state of the cluster for a NodePodProbe object and makes changes based on the state read
 // and what is in the NodePodProbe.Spec
 func (r *ReconcileNodePodProbe) Reconcile(_ context.Context, req ctrl.Request) (ctrl.Result, error) {
-	err := r.syncNodePodProbe(req.Name)
+	err := r.syncNodePodProbe(req.Name) // Node 名称
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -152,14 +155,14 @@ func (r *ReconcileNodePodProbe) syncNodePodProbe(name string) error {
 		return r.Delete(context.TODO(), npp)
 	}
 	// If Pod is deleted, then remove podProbe from NodePodProbe.Spec
-	matchedPods, err := r.syncPodFromNodePodProbe(npp)
+	matchedPods, err := r.syncPodFromNodePodProbe(npp) // 更新 NodePodProbe
 	if err != nil {
 		return err
 	}
 	for _, status := range npp.Status.PodProbeStatuses {
 		pod, ok := matchedPods[status.UID]
 		if !ok {
-			continue
+			continue // 如果还没有这个pod 的状态，就跳过
 		}
 		// Write podProbe state to Pod metadata and condition
 		if err = r.updatePodProbeStatus(pod, status); err != nil {
@@ -167,52 +170,6 @@ func (r *ReconcileNodePodProbe) syncNodePodProbe(name string) error {
 		}
 	}
 	return nil
-}
-
-func (r *ReconcileNodePodProbe) syncPodFromNodePodProbe(npp *appsv1alpha1.NodePodProbe) (map[string]*corev1.Pod, error) {
-	// map[pod.uid]=Pod
-	matchedPods := map[string]*corev1.Pod{}
-	for _, obj := range npp.Spec.PodProbes {
-		pod := &corev1.Pod{}
-		err := r.Get(context.TODO(), client.ObjectKey{Namespace: obj.Namespace, Name: obj.Name}, pod)
-		if err != nil && !errors.IsNotFound(err) {
-			klog.Errorf("NodePodProbe get pod(%s/%s) failed: %s", obj.Namespace, obj.Name, err.Error())
-			return nil, err
-		}
-		if errors.IsNotFound(err) || !kubecontroller.IsPodActive(pod) || string(pod.UID) != obj.UID {
-			continue
-		}
-		matchedPods[string(pod.UID)] = pod
-	}
-
-	newSpec := appsv1alpha1.NodePodProbeSpec{}
-	for i := range npp.Spec.PodProbes {
-		obj := npp.Spec.PodProbes[i]
-		if _, ok := matchedPods[obj.UID]; ok {
-			newSpec.PodProbes = append(newSpec.PodProbes, obj)
-		}
-	}
-	if reflect.DeepEqual(newSpec, npp.Spec) {
-		return matchedPods, nil
-	}
-
-	nppClone := &appsv1alpha1.NodePodProbe{}
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: npp.Name}, nppClone); err != nil {
-			klog.Errorf("error getting updated npp %s from client", npp.Name)
-		}
-		if reflect.DeepEqual(newSpec, nppClone.Spec) {
-			return nil
-		}
-		nppClone.Spec = newSpec
-		return r.Client.Update(context.TODO(), nppClone)
-	})
-	if err != nil {
-		klog.Errorf("NodePodProbe update NodePodProbe(%s) failed:%s", npp.Name, err.Error())
-		return nil, err
-	}
-	klog.V(3).Infof("NodePodProbe update NodePodProbe(%s) from(%s) -> to(%s) success", npp.Name, util.DumpJSON(npp.Spec), util.DumpJSON(newSpec))
-	return matchedPods, nil
 }
 
 func (r *ReconcileNodePodProbe) updatePodProbeStatus(pod *corev1.Pod, status appsv1alpha1.PodProbeStatus) error {
@@ -359,7 +316,7 @@ func (r *ReconcileNodePodProbe) updatePodProbeStatus(pod *corev1.Pod, status app
 			reflect.DeepEqual(oldMetadata.Annotations, podClone.Annotations) {
 			return nil
 		}
-		return r.Client.Status().Update(context.TODO(), podClone)
+		return r.Client.Status().Update(context.TODO(), podClone) // 声明、label 也会更新？
 	}); err != nil {
 		klog.Errorf("NodePodProbe patch pod(%s/%s) status failed: %s", podClone.Namespace, podClone.Name, err.Error())
 		return err
@@ -368,3 +325,55 @@ func (r *ReconcileNodePodProbe) updatePodProbeStatus(pod *corev1.Pod, status app
 		util.DumpJSON(probeMetadata), util.DumpJSON(probeConditions))
 	return nil
 }
+
+func (r *ReconcileNodePodProbe) syncPodFromNodePodProbe(npp *appsv1alpha1.NodePodProbe) (map[string]*corev1.Pod, error) {
+	// map[pod.uid]=Pod
+	matchedPods := map[string]*corev1.Pod{}
+	for _, obj := range npp.Spec.PodProbes {
+		pod := &corev1.Pod{}
+		err := r.Get(context.TODO(), client.ObjectKey{Namespace: obj.Namespace, Name: obj.Name}, pod)
+		if err != nil && !errors.IsNotFound(err) {
+			klog.Errorf("NodePodProbe get pod(%s/%s) failed: %s", obj.Namespace, obj.Name, err.Error())
+			return nil, err
+		}
+		if errors.IsNotFound(err) || !kubecontroller.IsPodActive(pod) || string(pod.UID) != obj.UID {
+			continue
+		}
+		matchedPods[string(pod.UID)] = pod
+	}
+
+	newSpec := appsv1alpha1.NodePodProbeSpec{}
+	for i := range npp.Spec.PodProbes {
+		obj := npp.Spec.PodProbes[i]
+		if _, ok := matchedPods[obj.UID]; ok {
+			newSpec.PodProbes = append(newSpec.PodProbes, obj)
+		}
+	}
+	if reflect.DeepEqual(newSpec, npp.Spec) {
+		return matchedPods, nil
+	}
+
+	nppClone := &appsv1alpha1.NodePodProbe{}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: npp.Name}, nppClone); err != nil {
+			klog.Errorf("error getting updated npp %s from client", npp.Name)
+		}
+		if reflect.DeepEqual(newSpec, nppClone.Spec) {
+			return nil
+		}
+		nppClone.Spec = newSpec
+		return r.Client.Update(context.TODO(), nppClone)
+	})
+	if err != nil {
+		klog.Errorf("NodePodProbe update NodePodProbe(%s) failed:%s", npp.Name, err.Error())
+		return nil, err
+	}
+	klog.V(3).Infof("NodePodProbe update NodePodProbe(%s) from(%s) -> to(%s) success", npp.Name, util.DumpJSON(npp.Spec), util.DumpJSON(newSpec))
+	return matchedPods, nil
+}
+
+/*
+1、创建ppm
+2、ppm 将 符合条件的podId、Probe 分发给每个 node 上的 npp
+3、daemon 负责将
+*/

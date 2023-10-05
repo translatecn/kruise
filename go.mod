@@ -5,15 +5,12 @@ go 1.19
 require (
 	github.com/alibaba/pouch v0.0.0-20190328125340-37051654f368
 	github.com/appscode/jsonpatch v1.0.1
-	github.com/codegangsta/negroni v1.0.0
 	github.com/containerd/containerd v1.5.16
 	github.com/docker/distribution v2.8.1+incompatible
 	github.com/docker/docker v20.10.12+incompatible
 	github.com/evanphx/json-patch v4.12.0+incompatible
 	github.com/fsnotify/fsnotify v1.5.1
 	github.com/go-bindata/go-bindata v3.1.2+incompatible
-	github.com/gorilla/mux v1.8.0
-	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.19.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.2
@@ -22,26 +19,25 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.8.1
-	github.com/xyproto/simpleredis v0.0.0-20200201215242-1ff0da2967b4
 	golang.org/x/net v0.8.0
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8
 	gomodules.xyz/jsonpatch/v2 v2.2.0
 	google.golang.org/grpc v1.40.0
-	k8s.io/api v0.24.16
-	k8s.io/apiextensions-apiserver v0.23.0
+	k8s.io/api v0.26.0
+	k8s.io/apiextensions-apiserver v0.26.0
 	k8s.io/apimachinery v0.27.4
 	k8s.io/apiserver v0.24.16
 	k8s.io/client-go v0.27.4
-	k8s.io/code-generator v0.24.16
+	k8s.io/code-generator v0.26.0
 	k8s.io/component-base v0.27.4
 	k8s.io/component-helpers v0.24.16
 	k8s.io/cri-api v0.24.16
-	k8s.io/gengo v0.0.0-20211129171323-c02415ce4185
+	k8s.io/gengo v0.0.0-20220902162205-c0856e24416d
 	k8s.io/klog/v2 v2.90.1
 	k8s.io/kube-openapi v0.0.0-20230501164219-8b0f38b5fd1f
 	k8s.io/kubernetes v1.24.0
 	k8s.io/utils v0.0.0-20230209194617-a36077c30491
-	sigs.k8s.io/controller-runtime v0.11.0
+	sigs.k8s.io/controller-runtime v0.12.1
 )
 
 require (
@@ -83,7 +79,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
-	github.com/gomodule/redigo v2.0.0+incompatible // indirect
 	github.com/google/gnostic v0.5.7-v3refs // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/google/gofuzz v1.1.0 // indirect
@@ -103,7 +98,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/oklog/ulid v1.3.1 // indirect
 	github.com/opencontainers/runc v1.1.6 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417 // indirect
@@ -113,7 +107,6 @@ require (
 	github.com/prometheus/common v0.32.1 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
-	github.com/xyproto/pinterface v0.0.0-20200201214933-70763765f31f // indirect
 	go.etcd.io/etcd/api/v3 v3.5.1 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.1 // indirect
 	go.etcd.io/etcd/client/v3 v3.5.1 // indirect
@@ -133,7 +126,6 @@ require (
 	google.golang.org/genproto v0.0.0-20220107163113-42d7afdf6368 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/cloud-provider v0.24.16 // indirect
@@ -174,4 +166,5 @@ replace (
 	k8s.io/mount-utils => k8s.io/mount-utils v0.24.16
 	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.24.16
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.24.16
+	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.12.3
 )

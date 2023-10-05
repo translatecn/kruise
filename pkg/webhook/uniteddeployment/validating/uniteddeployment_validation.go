@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
+
 	appsv1 "k8s.io/api/apps/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -36,7 +38,6 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	udctrl "github.com/openkruise/kruise/pkg/controller/uniteddeployment"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 )
 
 // validateUnitedDeploymentSpec tests if required fields in the UnitedDeployment spec are set.

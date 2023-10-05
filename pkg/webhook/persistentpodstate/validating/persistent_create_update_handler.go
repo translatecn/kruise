@@ -23,7 +23,7 @@ import (
 	"reflect"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/configuration"
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"

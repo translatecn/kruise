@@ -39,11 +39,6 @@ const (
 	rsaKeySize = 2048
 )
 
-// ServiceToCommonName generates the CommonName for the certificate when using a k8s service.
-func ServiceToCommonName(serviceNamespace, serviceName string) string {
-	return fmt.Sprintf("%s.%s.svc", serviceName, serviceNamespace)
-}
-
 // SelfSignedCertGenerator implements the certGenerator interface.
 // It provisions self-signed certificates.
 type SelfSignedCertGenerator struct {
@@ -52,12 +47,6 @@ type SelfSignedCertGenerator struct {
 }
 
 var _ CertGenerator = &SelfSignedCertGenerator{}
-
-// SetCA sets the PEM-encoded CA private key and CA cert for signing the generated serving cert.
-func (cp *SelfSignedCertGenerator) SetCA(caKey, caCert []byte) {
-	cp.caKey = caKey
-	cp.caCert = caCert
-}
 
 // Generate creates and returns a CA certificate, certificate and
 // key for the server. serverKey and serverCert are used by the server
@@ -109,30 +98,6 @@ func (cp *SelfSignedCertGenerator) Generate(commonName string) (*Artifacts, erro
 		CAKey:  EncodePrivateKeyPEM(signingKey),
 		CACert: EncodeCertPEM(signingCert),
 	}, nil
-}
-
-func (cp *SelfSignedCertGenerator) validCACert() (bool, *rsa.PrivateKey, *x509.Certificate) {
-	if !ValidCACert(cp.caKey, cp.caCert, cp.caCert, "", time.Now().AddDate(1, 0, 0)) {
-		return false, nil, nil
-	}
-
-	key, err := keyutil.ParsePrivateKeyPEM(cp.caKey)
-	if err != nil {
-		return false, nil, nil
-	}
-	privateKey, ok := key.(*rsa.PrivateKey)
-	if !ok {
-		return false, nil, nil
-	}
-
-	certs, err := cert.ParseCertsPEM(cp.caCert)
-	if err != nil {
-		return false, nil, nil
-	}
-	if len(certs) != 1 {
-		return false, nil, nil
-	}
-	return true, privateKey, certs[0]
 }
 
 // NewPrivateKey creates an RSA private key
@@ -189,4 +154,39 @@ func EncodeCertPEM(ct *x509.Certificate) []byte {
 		Bytes: ct.Raw,
 	}
 	return pem.EncodeToMemory(&block)
+}
+
+// ServiceToCommonName generates the CommonName for the certificate when using a k8s service.
+func ServiceToCommonName(serviceNamespace, serviceName string) string {
+	return fmt.Sprintf("%s.%s.svc", serviceName, serviceNamespace)
+}
+
+// SetCA sets the PEM-encoded CA private key and CA cert for signing the generated serving cert.
+func (cp *SelfSignedCertGenerator) SetCA(caKey, caCert []byte) {
+	cp.caKey = caKey
+	cp.caCert = caCert
+}
+
+func (cp *SelfSignedCertGenerator) validCACert() (bool, *rsa.PrivateKey, *x509.Certificate) {
+	if !ValidCACert(cp.caKey, cp.caCert, cp.caCert, "", time.Now().AddDate(1, 0, 0)) {
+		return false, nil, nil
+	}
+
+	key, err := keyutil.ParsePrivateKeyPEM(cp.caKey)
+	if err != nil {
+		return false, nil, nil
+	}
+	privateKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return false, nil, nil
+	}
+
+	certs, err := cert.ParseCertsPEM(cp.caCert)
+	if err != nil {
+		return false, nil, nil
+	}
+	if len(certs) != 1 {
+		return false, nil, nil
+	}
+	return true, privateKey, certs[0]
 }

@@ -31,6 +31,54 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// If none of the hot upgrade container has HotUpgradeEmptyImage,
+// then Pod is in hotUpgrading and return true
+func isPodSidecarInHotUpgrading(sidecarSet *appsv1alpha1.SidecarSet, pod *corev1.Pod) bool {
+	// 只有 empty 的镜像是 空镜像时，才算完成
+	containerImage := make(map[string]string)
+	for _, container := range pod.Spec.Containers {
+		containerImage[container.Name] = container.Image
+	}
+
+	for _, sidecar := range sidecarSet.Spec.Containers {
+		if sidecarcontrol.IsHotUpgradeContainer(&sidecar) {
+			_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecar.Name, pod)
+			if containerImage[emptyContainer] != sidecar.UpgradeStrategy.HotUpgradeEmptyImage {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// 所有容器 ready ，或非empty 容器 ready
+func isHotUpgradingReady(sidecarSet *appsv1alpha1.SidecarSet, pod *corev1.Pod) bool {
+	if util.IsRunningAndReady(pod) {
+		return true
+	}
+
+	emptyContainers := sets.NewString()
+	for _, sidecarContainer := range sidecarSet.Spec.Containers {
+		if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
+			_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecarContainer.Name, pod)
+			emptyContainers.Insert(emptyContainer)
+		}
+	}
+	//
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		// ignore empty sidecar container status
+		if emptyContainers.Has(containerStatus.Name) {
+			continue
+		}
+		// if container is not ready, then return false
+		if !containerStatus.Ready {
+			return false
+		}
+	}
+	// all containers with exception of empty sidecar containers are ready, then return true
+	return true
+}
+
 func (p *Processor) flipHotUpgradingContainers(control sidecarcontrol.SidecarControl, pods []*corev1.Pod) error {
 	for _, pod := range pods {
 		if err := p.flipPodSidecarContainer(control, pod); err != nil {
@@ -66,7 +114,8 @@ func (p *Processor) flipPodSidecarContainer(control sidecarcontrol.SidecarContro
 	return err
 }
 
-func flipPodSidecarContainerDo(control sidecarcontrol.SidecarControl, pod *corev1.Pod) {
+// 只是交换了声明中的empty 标识
+func flipPodSidecarContainerDo(control sidecarcontrol.SidecarControl, pod *corev1.Pod) { // 翻转 pod  container
 	sidecarSet := control.GetSidecarset()
 	containersInPod := make(map[string]*corev1.Container)
 	for i := range pod.Spec.Containers {
@@ -93,59 +142,13 @@ func flipPodSidecarContainerDo(control sidecarcontrol.SidecarControl, pod *corev
 		}
 	}
 	// record the updated container status, to determine if the update is complete
-	control.UpdatePodAnnotationsInUpgrade(changedContainer, pod)
+	control.UpdatePodAnnotationsInUpgrade(changedContainer, pod) // 要将哪些容器置为空镜像
 }
 
 func isSidecarSetHasHotUpgradeContainer(sidecarSet *appsv1alpha1.SidecarSet) bool {
 	for _, sidecarContainer := range sidecarSet.Spec.Containers {
 		if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
 			return true
-		}
-	}
-	return false
-}
-
-func isHotUpgradingReady(sidecarSet *appsv1alpha1.SidecarSet, pod *corev1.Pod) bool {
-	if util.IsRunningAndReady(pod) {
-		return true
-	}
-
-	emptyContainers := sets.NewString()
-	for _, sidecarContainer := range sidecarSet.Spec.Containers {
-		if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
-			_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecarContainer.Name, pod)
-			emptyContainers.Insert(emptyContainer)
-		}
-	}
-
-	for _, containerStatus := range pod.Status.ContainerStatuses {
-		// ignore empty sidecar container status
-		if emptyContainers.Has(containerStatus.Name) {
-			continue
-		}
-		// if container is not ready, then return false
-		if !containerStatus.Ready {
-			return false
-		}
-	}
-	// all containers with exception of empty sidecar containers are ready, then return true
-	return true
-}
-
-// If none of the hot upgrade container has HotUpgradeEmptyImage,
-// then Pod is in hotUpgrading and return true
-func isPodSidecarInHotUpgrading(sidecarSet *appsv1alpha1.SidecarSet, pod *corev1.Pod) bool {
-	containerImage := make(map[string]string)
-	for _, container := range pod.Spec.Containers {
-		containerImage[container.Name] = container.Image
-	}
-
-	for _, sidecar := range sidecarSet.Spec.Containers {
-		if sidecarcontrol.IsHotUpgradeContainer(&sidecar) {
-			_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecar.Name, pod)
-			if containerImage[emptyContainer] != sidecar.UpgradeStrategy.HotUpgradeEmptyImage {
-				return true
-			}
 		}
 	}
 	return false

@@ -20,8 +20,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/util/revision"
-	"github.com/openkruise/kruise/pkg/util/updatesort"
+	revision "github.com/openkruise/kruise/pkg/util/revision"
+	updatesort "github.com/openkruise/kruise/pkg/util/updatesort"
 )
 
 func sortPodsToUpdate(rollingUpdateStrategy *appsv1beta1.RollingUpdateStatefulSetStrategy, updateRevision string, totalReplicas int32, replicas []*v1.Pod) []int {

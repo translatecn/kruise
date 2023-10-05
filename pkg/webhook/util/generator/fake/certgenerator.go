@@ -33,12 +33,6 @@ type CertGenerator struct {
 
 var _ generator.CertGenerator = &CertGenerator{}
 
-// SetCA sets the PEM-encoded CA private key and CA cert for signing the generated serving cert.
-func (cp *CertGenerator) SetCA(CAKey, CACert []byte) {
-	cp.CAKey = CAKey
-	cp.CACert = CACert
-}
-
 // Generate generates certificates by matching a common name.
 func (cp *CertGenerator) Generate(commonName string) (*generator.Artifacts, error) {
 	certs, found := cp.DNSNameToCertArtifacts[commonName]
@@ -51,4 +45,10 @@ func (cp *CertGenerator) Generate(commonName string) (*generator.Artifacts, erro
 		certs.CACert = cp.CACert
 	}
 	return certs, nil
+}
+
+// SetCA sets the PEM-encoded CA private key and CA cert for signing the generated serving cert.
+func (cp *CertGenerator) SetCA(CAKey, CACert []byte) {
+	cp.CAKey = CAKey
+	cp.CACert = CACert
 }

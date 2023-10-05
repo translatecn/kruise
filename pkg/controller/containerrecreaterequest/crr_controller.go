@@ -29,9 +29,9 @@ import (
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/podadapter"
+	podadapter "github.com/openkruise/kruise/pkg/util/podadapter"
 	utilpodreadiness "github.com/openkruise/kruise/pkg/util/podreadiness"
-	"github.com/openkruise/kruise/pkg/util/requeueduration"
+	requeueduration "github.com/openkruise/kruise/pkg/util/requeueduration"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -227,33 +227,6 @@ func (r *ReconcileContainerRecreateRequest) Reconcile(_ context.Context, request
 	return reconcile.Result{RequeueAfter: duration.Get()}, nil
 }
 
-func (r *ReconcileContainerRecreateRequest) syncContainerStatuses(crr *appsv1alpha1.ContainerRecreateRequest, pod *v1.Pod) error {
-	syncContainerStatuses := make([]appsv1alpha1.ContainerRecreateRequestSyncContainerStatus, 0, len(crr.Spec.Containers))
-	for i := range crr.Spec.Containers {
-		c := &crr.Spec.Containers[i]
-		containerStatus := util.GetContainerStatus(c.Name, pod)
-		if containerStatus == nil {
-			klog.Warningf("Not found %s container in Pod Status for CRR %s/%s", c.Name, crr.Namespace, crr.Name)
-			continue
-		} else if containerStatus.State.Running == nil || containerStatus.State.Running.StartedAt.Before(&crr.CreationTimestamp) {
-			// ignore non-running and history status
-			continue
-		}
-		syncContainerStatuses = append(syncContainerStatuses, appsv1alpha1.ContainerRecreateRequestSyncContainerStatus{
-			Name:         containerStatus.Name,
-			Ready:        containerStatus.Ready,
-			RestartCount: containerStatus.RestartCount,
-			ContainerID:  containerStatus.ContainerID,
-		})
-	}
-	syncContainerStatusesStr := util.DumpJSON(syncContainerStatuses)
-	if crr.Annotations[appsv1alpha1.ContainerRecreateRequestSyncContainerStatusesKey] != syncContainerStatusesStr {
-		body := util.DumpJSON(syncPatchBody{Metadata: syncPatchMetadata{Annotations: map[string]string{appsv1alpha1.ContainerRecreateRequestSyncContainerStatusesKey: syncContainerStatusesStr}}})
-		return r.Patch(context.TODO(), crr, client.RawPatch(types.MergePatchType, []byte(body)))
-	}
-	return nil
-}
-
 type syncPatchBody struct {
 	Metadata syncPatchMetadata `json:"metadata"`
 }
@@ -265,7 +238,7 @@ type syncPatchMetadata struct {
 func (r *ReconcileContainerRecreateRequest) acquirePodNotReady(crr *appsv1alpha1.ContainerRecreateRequest, pod *v1.Pod) error {
 	// Note that we should add the finalizer first, then update pod condition, finally patch the label
 
-	if r.podReadinessControl.ContainsReadinessGate(pod) {
+	if r.podReadinessControl.ContainsReadinessGate(pod) { // KruisePodReady
 		if !slice.ContainsString(crr.Finalizers, appsv1alpha1.ContainerRecreateRequestUnreadyAcquiredKey, nil) {
 			err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 				newCRR := &appsv1alpha1.ContainerRecreateRequest{}
@@ -292,6 +265,9 @@ func (r *ReconcileContainerRecreateRequest) acquirePodNotReady(crr *appsv1alpha1
 	return r.Patch(context.TODO(), crr, client.RawPatch(types.MergePatchType, []byte(body)))
 }
 
+func getReadinessMessage(crr *appsv1alpha1.ContainerRecreateRequest) utilpodreadiness.Message {
+	return utilpodreadiness.Message{UserAgent: "ContainerRecreateRequest", Key: fmt.Sprintf("%s/%s", crr.Namespace, crr.Name)}
+}
 func (r *ReconcileContainerRecreateRequest) releasePodNotReady(crr *appsv1alpha1.ContainerRecreateRequest, pod *v1.Pod) error {
 	if pod != nil && pod.DeletionTimestamp == nil && r.podReadinessControl.ContainsReadinessGate(pod) {
 		err := r.podReadinessControl.RemoveNotReadyKey(pod, getReadinessMessage(crr))
@@ -323,7 +299,29 @@ func (r *ReconcileContainerRecreateRequest) completeCRR(crr *appsv1alpha1.Contai
 	crr.Status.Message = msg
 	return r.Status().Update(context.TODO(), crr)
 }
-
-func getReadinessMessage(crr *appsv1alpha1.ContainerRecreateRequest) utilpodreadiness.Message {
-	return utilpodreadiness.Message{UserAgent: "ContainerRecreateRequest", Key: fmt.Sprintf("%s/%s", crr.Namespace, crr.Name)}
+func (r *ReconcileContainerRecreateRequest) syncContainerStatuses(crr *appsv1alpha1.ContainerRecreateRequest, pod *v1.Pod) error {
+	syncContainerStatuses := make([]appsv1alpha1.ContainerRecreateRequestSyncContainerStatus, 0, len(crr.Spec.Containers))
+	for i := range crr.Spec.Containers {
+		c := &crr.Spec.Containers[i]
+		containerStatus := util.GetContainerStatus(c.Name, pod)
+		if containerStatus == nil {
+			klog.Warningf("Not found %s container in Pod Status for CRR %s/%s", c.Name, crr.Namespace, crr.Name)
+			continue
+		} else if containerStatus.State.Running == nil || containerStatus.State.Running.StartedAt.Before(&crr.CreationTimestamp) {
+			// ignore non-running and history status
+			continue
+		}
+		syncContainerStatuses = append(syncContainerStatuses, appsv1alpha1.ContainerRecreateRequestSyncContainerStatus{
+			Name:         containerStatus.Name,
+			Ready:        containerStatus.Ready,
+			RestartCount: containerStatus.RestartCount,
+			ContainerID:  containerStatus.ContainerID,
+		})
+	}
+	syncContainerStatusesStr := util.DumpJSON(syncContainerStatuses)
+	if crr.Annotations[appsv1alpha1.ContainerRecreateRequestSyncContainerStatusesKey] != syncContainerStatusesStr {
+		body := util.DumpJSON(syncPatchBody{Metadata: syncPatchMetadata{Annotations: map[string]string{appsv1alpha1.ContainerRecreateRequestSyncContainerStatusesKey: syncContainerStatusesStr}}})
+		return r.Patch(context.TODO(), crr, client.RawPatch(types.MergePatchType, []byte(body)))
+	}
+	return nil
 }

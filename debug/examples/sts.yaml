@@ -1,0 +1,45 @@
+apiVersion: apps.kruise.io/v1beta1
+kind: StatefulSet
+metadata:
+  name: nginx
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: nginx # has to match .spec.template.metadata.labels
+  serviceName: "nginx"
+  replicas: 3 # by default is 1
+  template:
+    metadata:
+      labels:
+        app: nginx # has to match .spec.selector.matchLabels
+    spec:
+      readinessGates:
+        # A new condition that ensures the pod remains at NotReady state while the in-place update is happening
+        - conditionType: InPlaceUpdateReady
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: nginx
+          image: nginx:1.24
+          ports:
+            - containerPort: 80
+              name: web
+#  podManagementPolicy: Parallel
+#  updateStrategy:
+#    type: RollingUpdate
+#    rollingUpdate:
+#      podUpdatePolicy: InPlaceIfPossible
+#      maxUnavailable: 20%
+#      unorderedUpdate:
+#        priorityStrategy:
+#          weightPriority:
+#            - weight: 50
+#              matchSelector:
+#                matchLabels:
+#                  test-key: foo
+#            - weight: 30
+#              matchSelector:
+#                matchLabels:
+#                  test-key: bar
+  reserveOrdinals: # 序号保留（跳过）
+    - 1

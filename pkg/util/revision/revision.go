@@ -22,7 +22,7 @@ import (
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	"github.com/openkruise/kruise/pkg/features"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 )
@@ -30,6 +30,9 @@ import (
 // IsPodUpdate return true when:
 // - Pod controller-revision-hash equals to updateRevision;
 // - Pod at preparing update state if PreparingUpdateAsUpdate feature-gated is enabled.
+// 当以下条件满足时，IsPodUpdate函数返回true：
+// - Pod的controller-revision-hash等于updateRevision；
+// - 如果启用了PreparingUpdateAsUpdate特性门控，则Pod处于准备更新状态。
 func IsPodUpdate(pod *v1.Pod, updateRevision string) bool {
 	if utilfeature.DefaultFeatureGate.Enabled(features.PreparingUpdateAsUpdate) &&
 		lifecycle.GetPodLifecycleState(pod) == appspub.LifecycleStatePreparingUpdate {

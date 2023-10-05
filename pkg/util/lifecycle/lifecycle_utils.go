@@ -22,8 +22,8 @@ import (
 	"time"
 
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	"github.com/openkruise/kruise/pkg/util/podadapter"
-	"github.com/openkruise/kruise/pkg/util/podreadiness"
+	podadapter "github.com/openkruise/kruise/pkg/util/podadapter"
+	podreadiness "github.com/openkruise/kruise/pkg/util/podreadiness"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -90,19 +90,6 @@ func IsLifecycleMarkPodNotReady(lifecycle *appspub.Lifecycle) bool {
 		return false
 	}
 	return IsHookMarkPodNotReady(lifecycle.PreDelete) || IsHookMarkPodNotReady(lifecycle.InPlaceUpdate)
-}
-
-func SetPodLifecycle(state appspub.LifecycleStateType) func(*v1.Pod) {
-	return func(pod *v1.Pod) {
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Labels[appspub.LifecycleStateKey] = string(state)
-		pod.Annotations[appspub.LifecycleTimestampKey] = time.Now().Format(time.RFC3339)
-	}
 }
 
 func (c *realControl) executePodNotReadyPolicy(pod *v1.Pod, state appspub.LifecycleStateType) (err error) {
@@ -239,4 +226,16 @@ func IsPodAllHooked(hook *appspub.LifecycleHook, pod *v1.Pod) bool {
 
 func getReadinessMessage(key string) podreadiness.Message {
 	return podreadiness.Message{UserAgent: "Lifecycle", Key: key}
+}
+func SetPodLifecycle(state appspub.LifecycleStateType) func(*v1.Pod) {
+	return func(pod *v1.Pod) {
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Labels[appspub.LifecycleStateKey] = string(state)
+		pod.Annotations[appspub.LifecycleTimestampKey] = time.Now().Format(time.RFC3339)
+	}
 }

@@ -33,115 +33,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	appsalphav1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
+	refmanager "github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
 // ControllerRevisionHashLabel is the label used to indicate the hash value of a ControllerRevision's Data.
 const ControllerRevisionHashLabel = "controller.kubernetes.io/hash"
-
-func (r *ReconcileUnitedDeployment) controlledHistories(ud *appsalphav1.UnitedDeployment) ([]*apps.ControllerRevision, error) {
-	// List all histories to include those that don't match the selector anymore
-	// but have a ControllerRef pointing to the controller.
-	selector, err := metav1.LabelSelectorAsSelector(ud.Spec.Selector)
-	if err != nil {
-		return nil, err
-	}
-	histories := &apps.ControllerRevisionList{}
-	err = r.Client.List(context.TODO(), histories, &client.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return nil, err
-	}
-	klog.V(1).Infof("List controller revision of UnitedDeployment %s/%s: count %d\n", ud.Namespace, ud.Name, len(histories.Items))
-
-	// Use ControllerRefManager to adopt/orphan as needed.
-	cm, err := refmanager.New(r.Client, ud.Spec.Selector, ud, r.scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	mts := make([]metav1.Object, len(histories.Items))
-	for i, history := range histories.Items {
-		mts[i] = history.DeepCopy()
-	}
-	claims, err := cm.ClaimOwnedObjects(mts)
-	if err != nil {
-		return nil, err
-	}
-
-	claimHistories := make([]*apps.ControllerRevision, len(claims))
-	for i, mt := range claims {
-		claimHistories[i] = mt.(*apps.ControllerRevision)
-	}
-
-	return claimHistories, nil
-}
-
-func (r *ReconcileUnitedDeployment) constructUnitedDeploymentRevisions(ud *appsalphav1.UnitedDeployment) (*apps.ControllerRevision, *apps.ControllerRevision, *[]*apps.ControllerRevision, int32, error) {
-	var currentRevision, updateRevision *apps.ControllerRevision
-	// Use a local copy of ud.Status.CollisionCount to avoid modifying ud.Status directly.
-	var collisionCount int32
-	if ud.Status.CollisionCount != nil {
-		collisionCount = *ud.Status.CollisionCount
-	}
-
-	revisions, err := r.controlledHistories(ud)
-	if err != nil {
-		return currentRevision, updateRevision, nil, collisionCount, err
-	}
-
-	history.SortControllerRevisions(revisions)
-	cleanedRevision, err := r.cleanExpiredRevision(ud, &revisions)
-	if err != nil {
-		return currentRevision, updateRevision, nil, collisionCount, err
-	}
-	revisions = *cleanedRevision
-
-	// create a new revision from the current ud
-	updateRevision, err = r.newRevision(ud, nextRevision(revisions), &collisionCount)
-	if err != nil {
-		return nil, nil, nil, collisionCount, err
-	}
-
-	// find any equivalent revisions
-	equalRevisions := history.FindEqualRevisions(revisions, updateRevision)
-	equalCount := len(equalRevisions)
-	revisionCount := len(revisions)
-
-	if equalCount > 0 && history.EqualRevision(revisions[revisionCount-1], equalRevisions[equalCount-1]) {
-		// if the equivalent revision is immediately prior the update revision has not changed
-		updateRevision = revisions[revisionCount-1]
-	} else if equalCount > 0 {
-		// if the equivalent revision is not immediately prior we will roll back by incrementing the
-		// Revision of the equivalent revision
-		equalRevisions[equalCount-1].Revision = updateRevision.Revision
-		err := r.Client.Update(context.TODO(), equalRevisions[equalCount-1])
-		if err != nil {
-			return nil, nil, nil, collisionCount, err
-		}
-		updateRevision = equalRevisions[equalCount-1]
-	} else {
-		//if there is no equivalent revision we create a new one
-		updateRevision, err = r.createControllerRevision(ud, updateRevision, &collisionCount)
-		if err != nil {
-			return nil, nil, nil, collisionCount, err
-		}
-	}
-
-	// attempt to find the revision that corresponds to the current revision
-	for i := range revisions {
-		if revisions[i].Name == ud.Status.CurrentRevision {
-			currentRevision = revisions[i]
-			break
-		}
-	}
-
-	// if the current revision is nil we initialize the history by setting it to the update revision
-	if currentRevision == nil {
-		currentRevision = updateRevision
-	}
-
-	return currentRevision, updateRevision, &revisions, collisionCount, nil
-}
 
 func (r *ReconcileUnitedDeployment) cleanExpiredRevision(ud *appsalphav1.UnitedDeployment, sortedRevisions *[]*apps.ControllerRevision) (*[]*apps.ControllerRevision, error) {
 	exceedNum := len(*sortedRevisions) - int(*ud.Spec.RevisionHistoryLimit)
@@ -276,4 +172,108 @@ func getUnitedDeploymentPatch(ud *appsalphav1.UnitedDeployment) ([]byte, error) 
 	objCopy["spec"] = specCopy
 	patch, err := json.Marshal(objCopy)
 	return patch, err
+}
+
+func (r *ReconcileUnitedDeployment) constructUnitedDeploymentRevisions(ud *appsalphav1.UnitedDeployment) (*apps.ControllerRevision, *apps.ControllerRevision, *[]*apps.ControllerRevision, int32, error) {
+	var currentRevision, updateRevision *apps.ControllerRevision
+	// Use a local copy of ud.Status.CollisionCount to avoid modifying ud.Status directly.
+	var collisionCount int32
+	if ud.Status.CollisionCount != nil {
+		collisionCount = *ud.Status.CollisionCount
+	}
+
+	revisions, err := r.controlledHistories(ud)
+	if err != nil {
+		return currentRevision, updateRevision, nil, collisionCount, err
+	}
+
+	history.SortControllerRevisions(revisions)
+	cleanedRevision, err := r.cleanExpiredRevision(ud, &revisions)
+	if err != nil {
+		return currentRevision, updateRevision, nil, collisionCount, err
+	}
+	revisions = *cleanedRevision
+
+	// create a new revision from the current ud
+	updateRevision, err = r.newRevision(ud, nextRevision(revisions), &collisionCount)
+	if err != nil {
+		return nil, nil, nil, collisionCount, err
+	}
+
+	// find any equivalent revisions
+	equalRevisions := history.FindEqualRevisions(revisions, updateRevision)
+	equalCount := len(equalRevisions)
+	revisionCount := len(revisions)
+
+	if equalCount > 0 && history.EqualRevision(revisions[revisionCount-1], equalRevisions[equalCount-1]) {
+		// if the equivalent revision is immediately prior the update revision has not changed
+		updateRevision = revisions[revisionCount-1]
+	} else if equalCount > 0 {
+		// if the equivalent revision is not immediately prior we will roll back by incrementing the
+		// Revision of the equivalent revision
+		equalRevisions[equalCount-1].Revision = updateRevision.Revision
+		err := r.Client.Update(context.TODO(), equalRevisions[equalCount-1])
+		if err != nil {
+			return nil, nil, nil, collisionCount, err
+		}
+		updateRevision = equalRevisions[equalCount-1]
+	} else {
+		//if there is no equivalent revision we create a new one
+		updateRevision, err = r.createControllerRevision(ud, updateRevision, &collisionCount)
+		if err != nil {
+			return nil, nil, nil, collisionCount, err
+		}
+	}
+
+	// attempt to find the revision that corresponds to the current revision
+	for i := range revisions {
+		if revisions[i].Name == ud.Status.CurrentRevision {
+			currentRevision = revisions[i]
+			break
+		}
+	}
+
+	// if the current revision is nil we initialize the history by setting it to the update revision
+	if currentRevision == nil {
+		currentRevision = updateRevision
+	}
+
+	return currentRevision, updateRevision, &revisions, collisionCount, nil
+}
+
+func (r *ReconcileUnitedDeployment) controlledHistories(ud *appsalphav1.UnitedDeployment) ([]*apps.ControllerRevision, error) {
+	// List all histories to include those that don't match the selector anymore
+	// but have a ControllerRef pointing to the controller.
+	selector, err := metav1.LabelSelectorAsSelector(ud.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+	histories := &apps.ControllerRevisionList{}
+	err = r.Client.List(context.TODO(), histories, &client.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+	klog.V(1).Infof("List controller revision of UnitedDeployment %s/%s: count %d\n", ud.Namespace, ud.Name, len(histories.Items))
+
+	// Use ControllerRefManager to adopt/orphan as needed.
+	cm, err := refmanager.New(r.Client, ud.Spec.Selector, ud, r.scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	mts := make([]metav1.Object, len(histories.Items))
+	for i, history := range histories.Items {
+		mts[i] = history.DeepCopy()
+	}
+	claims, err := cm.ClaimOwnedObjects(mts)
+	if err != nil {
+		return nil, err
+	}
+
+	claimHistories := make([]*apps.ControllerRevision, len(claims))
+	for i, mt := range claims {
+		claimHistories[i] = mt.(*apps.ControllerRevision)
+	}
+
+	return claimHistories, nil
 }

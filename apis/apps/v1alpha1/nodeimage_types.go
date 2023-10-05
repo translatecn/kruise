@@ -80,6 +80,10 @@ type ImageTagSpec struct {
 	// Value must be treated as opaque by clients and .
 	// +optional
 	Version int64 `json:"version,omitempty"`
+	// Whether to trigger forcible update when the image exists on the host
+	//
+	// +optional
+	ForcePull bool `json:"forcePull,omitempty"`
 }
 
 // ImageTagPullPolicy defines the policy of the pulling task

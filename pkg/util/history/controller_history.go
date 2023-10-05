@@ -92,27 +92,6 @@ func (rh *realHistory) CreateControllerRevision(parent metav1.Object, revision *
 	}
 }
 
-func (rh *realHistory) UpdateControllerRevision(revision *apps.ControllerRevision, newRevision int64) (*apps.ControllerRevision, error) {
-	clone := revision.DeepCopy()
-	namespacedName := types.NamespacedName{Namespace: clone.Namespace, Name: clone.Name}
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if clone.Revision == newRevision {
-			return nil
-		}
-		clone.Revision = newRevision
-		updateErr := rh.Update(context.TODO(), clone)
-		if updateErr == nil {
-			return nil
-		}
-		got := &apps.ControllerRevision{}
-		if err := rh.Get(context.TODO(), namespacedName, got); err == nil {
-			clone = got
-		}
-		return updateErr
-	})
-	return clone, err
-}
-
 func (rh *realHistory) DeleteControllerRevision(revision *apps.ControllerRevision) error {
 	return rh.Delete(context.TODO(), revision)
 }
@@ -196,4 +175,25 @@ func (rh *realHistory) ReleaseControllerRevision(parent metav1.Object, revision 
 		return nil, err
 	}
 	return clone, nil
+}
+
+func (rh *realHistory) UpdateControllerRevision(revision *apps.ControllerRevision, newRevision int64) (*apps.ControllerRevision, error) {
+	clone := revision.DeepCopy()
+	namespacedName := types.NamespacedName{Namespace: clone.Namespace, Name: clone.Name}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if clone.Revision == newRevision {
+			return nil
+		}
+		clone.Revision = newRevision
+		updateErr := rh.Update(context.TODO(), clone)
+		if updateErr == nil {
+			return nil
+		}
+		got := &apps.ControllerRevision{}
+		if err := rh.Get(context.TODO(), namespacedName, got); err == nil {
+			clone = got
+		}
+		return updateErr
+	})
+	return clone, err
 }

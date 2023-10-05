@@ -41,25 +41,6 @@ func (c *commonControl) IsActiveSidecarSet() bool {
 	return true
 }
 
-func (c *commonControl) UpgradeSidecarContainer(sidecarContainer *appsv1alpha1.SidecarContainer, pod *v1.Pod) *v1.Container {
-	var nameToUpgrade, otherContainer, oldImage string
-	if IsHotUpgradeContainer(sidecarContainer) {
-		nameToUpgrade, otherContainer = findContainerToHotUpgrade(sidecarContainer, pod, c)
-		oldImage = util.GetContainer(otherContainer, pod).Image
-	} else {
-		nameToUpgrade = sidecarContainer.Name
-		oldImage = util.GetContainer(nameToUpgrade, pod).Image
-	}
-	// community in-place upgrades are only allowed to update image
-	if sidecarContainer.Image == oldImage {
-		return nil
-	}
-	container := util.GetContainer(nameToUpgrade, pod)
-	container.Image = sidecarContainer.Image
-	klog.V(3).Infof("upgrade pod(%s/%s) container(%s) Image from(%s) -> to(%s)", pod.Namespace, pod.Name, nameToUpgrade, oldImage, container.Image)
-	return container
-}
-
 func (c *commonControl) NeedToInjectVolumeMount(volumeMount v1.VolumeMount) bool {
 	return true
 }
@@ -95,50 +76,39 @@ func (c *commonControl) IsPodReady(pod *v1.Pod) bool {
 	return util.IsRunningAndReady(pod)
 }
 
-func (c *commonControl) UpdatePodAnnotationsInUpgrade(changedContainers []string, pod *v1.Pod) {
+// k8s only allow modify pod.spec.container[x].image,
+// only when annotations[SidecarSetHashWithoutImageAnnotation] is the same, sidecarSet can upgrade pods
+func (c *commonControl) IsSidecarSetUpgradable(pod *v1.Pod) bool { //  image和status 里的发生了变化
 	sidecarSet := c.GetSidecarset()
-	// record the ImageID, before update pod sidecar container
-	// if it is changed, indicates the update is complete.
-	// format: sidecarset.name -> appsv1alpha1.InPlaceUpdateState
-	sidecarUpdateStates := make(map[string]*pub.InPlaceUpdateState)
-	if stateStr := pod.Annotations[SidecarsetInplaceUpdateStateKey]; len(stateStr) > 0 {
-		if err := json.Unmarshal([]byte(stateStr), &sidecarUpdateStates); err != nil {
-			klog.Errorf("parse pod(%s/%s) annotations[%s] value(%s) failed: %s",
-				pod.Namespace, pod.Name, SidecarsetInplaceUpdateStateKey, stateStr, err.Error())
-		}
-	}
-	inPlaceUpdateState, ok := sidecarUpdateStates[sidecarSet.Name]
-	if !ok {
-		inPlaceUpdateState = &pub.InPlaceUpdateState{
-			Revision:        GetSidecarSetRevision(sidecarSet),
-			UpdateTimestamp: metav1.Now(),
-		}
-	}
-	// format: container.name -> pod.status.containers[container.name].ImageID
-	if inPlaceUpdateState.LastContainerStatuses == nil {
-		inPlaceUpdateState.LastContainerStatuses = make(map[string]pub.InPlaceUpdateContainerStatus)
+	// SidecarSet 的hash 与 pod 里记录的 hash 是否一致； 不一样的就跳过
+	if GetPodSidecarSetWithoutImageRevision(sidecarSet.Name, pod) != GetSidecarSetWithoutImageRevision(sidecarSet) {
+		return false
 	}
 
-	cStatus := make(map[string]string, len(pod.Status.ContainerStatuses))
-	for i := range pod.Status.ContainerStatuses {
-		c := &pod.Status.ContainerStatuses[i]
-		cStatus[c.Name] = c.ImageID
+	// cStatus: container.name -> containerStatus.Ready
+	cStatus := map[string]bool{}
+	for _, status := range pod.Status.ContainerStatuses {
+		cStatus[status.Name] = status.Ready
 	}
-	for _, cName := range changedContainers {
-		updateStatus := pub.InPlaceUpdateContainerStatus{
-			ImageID: cStatus[cName],
+	sidecarContainerList := GetSidecarContainersInPod(sidecarSet)
+	for _, sidecar := range sidecarContainerList.List() {
+		// when containerStatus.Ready == true and container non-consistent,
+		// indicates that sidecar container is in the process of being upgraded
+		// wait for the last upgrade to complete before performing this upgrade
+		if cStatus[sidecar] && !c.IsPodStateConsistent(pod, sets.NewString(sidecar)) {
+			return false
 		}
-		// record status.ImageId before update pods in store
-		inPlaceUpdateState.LastContainerStatuses[cName] = updateStatus
 	}
 
-	// record sidecar container status information in pod's annotations
-	sidecarUpdateStates[sidecarSet.Name] = inPlaceUpdateState
-	by, _ := json.Marshal(sidecarUpdateStates)
-	pod.Annotations[SidecarsetInplaceUpdateStateKey] = string(by)
+	return true
+}
+
+func (c *commonControl) IsPodAvailabilityChanged(pod, oldPod *v1.Pod) bool {
+	return false
 }
 
 // only check sidecar container is consistent
+// 检查pod 使用的镜像是否可以变（没有sha256的都可以变）
 func (c *commonControl) IsPodStateConsistent(pod *v1.Pod, sidecarContainers sets.String) bool {
 	if len(pod.Spec.Containers) != len(pod.Status.ContainerStatuses) {
 		return false
@@ -181,39 +151,12 @@ func (c *commonControl) IsPodStateConsistent(pod *v1.Pod, sidecarContainers sets
 	return IsSidecarContainerUpdateCompleted(pod, sets.NewString(sidecarset.Name), sidecarContainers)
 }
 
-// k8s only allow modify pod.spec.container[x].image,
-// only when annotations[SidecarSetHashWithoutImageAnnotation] is the same, sidecarSet can upgrade pods
-func (c *commonControl) IsSidecarSetUpgradable(pod *v1.Pod) bool {
-	sidecarSet := c.GetSidecarset()
-	if GetPodSidecarSetWithoutImageRevision(sidecarSet.Name, pod) != GetSidecarSetWithoutImageRevision(sidecarSet) {
-		return false
-	}
-
-	// cStatus: container.name -> containerStatus.Ready
-	cStatus := map[string]bool{}
-	for _, status := range pod.Status.ContainerStatuses {
-		cStatus[status.Name] = status.Ready
-	}
-	sidecarContainerList := GetSidecarContainersInPod(sidecarSet)
-	for _, sidecar := range sidecarContainerList.List() {
-		// when containerStatus.Ready == true and container non-consistent,
-		// indicates that sidecar container is in the process of being upgraded
-		// wait for the last upgrade to complete before performing this upgrade
-		if cStatus[sidecar] && !c.IsPodStateConsistent(pod, sets.NewString(sidecar)) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (c *commonControl) IsPodAvailabilityChanged(pod, oldPod *v1.Pod) bool {
-	return false
-}
-
-// isContainerInplaceUpdateCompleted checks whether imageID in container status has been changed since in-place update.
+// IsSidecarContainerUpdateCompleted isContainerInplaceUpdateCompleted checks whether imageID in container status has been changed since in-place update.
 // If the imageID in containerStatuses has not been changed, we assume that kubelet has not updated containers in Pod.
+// isContainerInplaceUpdateCompleted检查容器状态中的imageID是否在本地更新后发生了变化。
+// 如果containerstatus中的imageID没有被更改，我们假设kubelet没有更新Pod中的容器。
 func IsSidecarContainerUpdateCompleted(pod *v1.Pod, sidecarSets, containers sets.String) bool {
+	// 是否更新完成
 	// format: sidecarset.name -> appsv1alpha1.InPlaceUpdateState
 	sidecarUpdateStates := make(map[string]*pub.InPlaceUpdateState)
 	// when the pod annotation not found, indicates the pod only injected sidecar container, and never inplace update
@@ -263,4 +206,67 @@ func IsSidecarContainerUpdateCompleted(pod *v1.Pod, sidecarSets, containers sets
 	}
 
 	return true
+}
+
+func (c *commonControl) UpdatePodAnnotationsInUpgrade(changedContainers []string, pod *v1.Pod) {
+	sidecarSet := c.GetSidecarset()
+	// record the ImageID, before update pod sidecar container
+	// if it is changed, indicates the update is complete.
+	// format: sidecarset.name -> appsv1alpha1.InPlaceUpdateState
+	sidecarUpdateStates := make(map[string]*pub.InPlaceUpdateState)
+	if stateStr := pod.Annotations[SidecarsetInplaceUpdateStateKey]; len(stateStr) > 0 {
+		if err := json.Unmarshal([]byte(stateStr), &sidecarUpdateStates); err != nil {
+			klog.Errorf("parse pod(%s/%s) annotations[%s] value(%s) failed: %s",
+				pod.Namespace, pod.Name, SidecarsetInplaceUpdateStateKey, stateStr, err.Error())
+		}
+	}
+	inPlaceUpdateState, ok := sidecarUpdateStates[sidecarSet.Name]
+	if !ok {
+		inPlaceUpdateState = &pub.InPlaceUpdateState{
+			Revision:        GetSidecarSetRevision(sidecarSet),
+			UpdateTimestamp: metav1.Now(),
+		}
+	}
+	// format: container.name -> pod.status.containers[container.name].ImageID
+	if inPlaceUpdateState.LastContainerStatuses == nil {
+		inPlaceUpdateState.LastContainerStatuses = make(map[string]pub.InPlaceUpdateContainerStatus)
+	}
+
+	cStatus := make(map[string]string, len(pod.Status.ContainerStatuses))
+	for i := range pod.Status.ContainerStatuses {
+		c := &pod.Status.ContainerStatuses[i]
+		cStatus[c.Name] = c.ImageID
+	}
+	for _, cName := range changedContainers { // empty -> work image ; image1->image2 ;work image -> empty
+		updateStatus := pub.InPlaceUpdateContainerStatus{
+			ImageID: cStatus[cName],
+		}
+		// record status.ImageId before update pods in store
+		inPlaceUpdateState.LastContainerStatuses[cName] = updateStatus
+	}
+
+	// record sidecar container status information in pod's annotations
+	sidecarUpdateStates[sidecarSet.Name] = inPlaceUpdateState // 记录更新前的image id
+	by, _ := json.Marshal(sidecarUpdateStates)
+	pod.Annotations[SidecarsetInplaceUpdateStateKey] = string(by)
+}
+
+func (c *commonControl) UpgradeSidecarContainer(sidecarContainer *appsv1alpha1.SidecarContainer, pod *v1.Pod) *v1.Container {
+	var nameToUpgrade, otherContainer, oldImage string
+	if IsHotUpgradeContainer(sidecarContainer) { // 热升级
+		nameToUpgrade, otherContainer = findContainerToHotUpgrade(sidecarContainer, pod, c) // empty容器，服务容器    ,热升级的有俩容器
+		oldImage = util.GetContainer(otherContainer, pod).Image
+	} else {
+		nameToUpgrade = sidecarContainer.Name
+		oldImage = util.GetContainer(nameToUpgrade, pod).Image
+	}
+	// community in-place upgrades are only allowed to update image
+	// 就地升级 只允许更新映像
+	if sidecarContainer.Image == oldImage {
+		return nil
+	}
+	container := util.GetContainer(nameToUpgrade, pod)
+	container.Image = sidecarContainer.Image
+	klog.V(3).Infof("upgrade pod(%s/%s) container(%s) Image from(%s) -> to(%s)", pod.Namespace, pod.Name, nameToUpgrade, oldImage, container.Image)
+	return container
 }

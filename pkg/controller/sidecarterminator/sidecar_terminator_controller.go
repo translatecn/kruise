@@ -22,12 +22,13 @@ import (
 	"strings"
 	"time"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -126,63 +127,10 @@ func (r *ReconcileSidecarTerminator) Reconcile(_ context.Context, request reconc
 	return r.doReconcile(pod)
 }
 
-func (r *ReconcileSidecarTerminator) doReconcile(pod *corev1.Pod) (reconcile.Result, error) {
-	if !isInterestingPod(pod) {
-		return reconcile.Result{}, nil
-	}
-
-	if containersCompleted(pod, getSidecar(pod)) {
-		klog.V(3).Infof("SidecarTerminator -- all sidecars of pod(%v/%v) have been completed, no need to process", pod.Namespace, pod.Name)
-		return reconcile.Result{}, nil
-	}
-
-	if pod.Spec.RestartPolicy == corev1.RestartPolicyOnFailure && !containersSucceeded(pod, getMain(pod)) {
-		klog.V(3).Infof("SidecarTerminator -- pod(%v/%v) is trying to restart, no need to process", pod.Namespace, pod.Name)
-		return reconcile.Result{}, nil
-	}
-
-	sidecarNeedToExecuteKillContainer, sidecarNeedToExecuteInPlaceUpdate, err := r.groupSidecars(pod)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	if err := r.executeInPlaceUpdateAction(pod, sidecarNeedToExecuteInPlaceUpdate); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	if err := r.executeKillContainerAction(pod, sidecarNeedToExecuteKillContainer); err != nil {
-		return reconcile.Result{}, err
-	}
-
-	return reconcile.Result{}, nil
-}
-
-func (r *ReconcileSidecarTerminator) groupSidecars(pod *corev1.Pod) (sets.String, sets.String, error) {
-	runningOnVK, err := IsPodRunningOnVirtualKubelet(pod, r.Client)
-	if err != nil {
-		return nil, nil, client.IgnoreNotFound(err)
-	}
-
-	inPlaceUpdate := sets.NewString()
-	killContainer := sets.NewString()
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		for j := range container.Env {
-			if !runningOnVK && container.Env[j].Name == appsv1alpha1.KruiseTerminateSidecarEnv &&
-				strings.EqualFold(container.Env[j].Value, "true") {
-				killContainer.Insert(container.Name)
-				break
-			}
-			if container.Env[j].Name == appsv1alpha1.KruiseTerminateSidecarWithImageEnv &&
-				container.Env[j].Value != "" {
-				inPlaceUpdate.Insert(container.Name)
-			}
-		}
-	}
-	return killContainer, inPlaceUpdate, nil
-}
-
 func containersCompleted(pod *corev1.Pod, containers sets.String) bool {
+	// 所有设置了 	// KRUISE_TERMINATE_SIDECAR_WHEN_JOB_EXIT=true
+	//		// KRUISE_TERMINATE_SIDECAR_WHEN_JOB_EXIT_WITH_IMAGE
+	// 的都终止了
 	if len(pod.Spec.Containers) != len(pod.Status.ContainerStatuses) {
 		return false
 	}
@@ -209,4 +157,65 @@ func containersSucceeded(pod *corev1.Pod, containers sets.String) bool {
 		}
 	}
 	return true
+}
+
+func (r *ReconcileSidecarTerminator) doReconcile(pod *corev1.Pod) (reconcile.Result, error) {
+	if !isInterestingPod(pod) {
+		return reconcile.Result{}, nil
+	}
+
+	if containersCompleted(pod, getSidecar(pod)) { // 所有的sidecar 容器都终止了,
+		klog.V(3).Infof("SidecarTerminator -- all sidecars of pod(%v/%v) have been completed, no need to process", pod.Namespace, pod.Name)
+		return reconcile.Result{}, nil
+	}
+
+	if pod.Spec.RestartPolicy == corev1.RestartPolicyOnFailure && !containersSucceeded(pod, getMain(pod)) {
+		// 失败了 需要重启，  这个情况 需要忽略
+		klog.V(3).Infof("SidecarTerminator -- pod(%v/%v) is trying to restart, no need to process", pod.Namespace, pod.Name)
+		return reconcile.Result{}, nil
+	}
+
+	// 主容器都退了，让sidecar 也推出
+	//
+
+	sidecarNeedToExecuteKillContainer, sidecarNeedToExecuteInPlaceUpdate, err := r.groupSidecars(pod)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if err := r.executeInPlaceUpdateAction(pod, sidecarNeedToExecuteInPlaceUpdate); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if err := r.executeKillContainerAction(pod, sidecarNeedToExecuteKillContainer); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileSidecarTerminator) groupSidecars(pod *corev1.Pod) (sets.String, sets.String, error) {
+	runningOnVK, err := IsPodRunningOnVirtualKubelet(pod, r.Client)
+	if err != nil {
+		return nil, nil, client.IgnoreNotFound(err)
+	}
+
+	inPlaceUpdate := sets.NewString() // 替换镜像的container
+	killContainer := sets.NewString() // 需要终止的container
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		for j := range container.Env {
+			if !runningOnVK && container.Env[j].Name == appsv1alpha1.KruiseTerminateSidecarEnv &&
+				strings.EqualFold(container.Env[j].Value, "true") {
+				killContainer.Insert(container.Name)
+				break
+			}
+			if container.Env[j].Name == appsv1alpha1.KruiseTerminateSidecarWithImageEnv &&
+				container.Env[j].Value != "" {
+				inPlaceUpdate.Insert(container.Name)
+			}
+		}
+	}
+	// 找到一个 bug
+	return killContainer, inPlaceUpdate, nil
 }

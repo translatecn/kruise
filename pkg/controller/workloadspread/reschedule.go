@@ -27,6 +27,32 @@ import (
 	wsutil "github.com/openkruise/kruise/pkg/webhook/workloadspread/validating"
 )
 
+func (r *ReconcileWorkloadSpread) cleanupUnscheduledPods(ws *appsv1alpha1.WorkloadSpread,
+	scheduleFailedPodsMap map[string][]*corev1.Pod) error {
+	for subsetName, pods := range scheduleFailedPodsMap {
+		if err := r.deletePodsForSubset(ws, pods, subsetName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ReconcileWorkloadSpread) deletePodsForSubset(ws *appsv1alpha1.WorkloadSpread,
+	pods []*corev1.Pod, subsetName string) error {
+	for _, pod := range pods {
+		if err := r.Client.Delete(context.TODO(), pod); err != nil {
+			r.recorder.Eventf(ws, corev1.EventTypeWarning,
+				"DeletePodFailed",
+				"Failed to delete unschedulabe Pod %s/%s in Subset %s of WorkloadSpread %s/%s",
+				pod.Namespace, pod.Name, subsetName, ws.Namespace, ws.Name)
+			return err
+		}
+		klog.V(3).Infof("WorkloadSpread (%s/%s) delete unschedulabe Pod (%s/%s) in Subset %s successfully",
+			ws.Namespace, ws.Name, pod.Namespace, pod.Name, subsetName)
+	}
+	return nil
+}
+
 // rescheduleSubset will delete some unschedulable Pods that still in pending status. Some subsets have no
 // sufficient resource can lead to some Pods scheduled failed. WorkloadSpread has multiple subset, so these
 // unschedulable Pods should be rescheduled to other subsets.
@@ -82,32 +108,6 @@ func (r *ReconcileWorkloadSpread) rescheduleSubset(ws *appsv1alpha1.WorkloadSpre
 	}
 
 	return scheduleFailedPods
-}
-
-func (r *ReconcileWorkloadSpread) cleanupUnscheduledPods(ws *appsv1alpha1.WorkloadSpread,
-	scheduleFailedPodsMap map[string][]*corev1.Pod) error {
-	for subsetName, pods := range scheduleFailedPodsMap {
-		if err := r.deletePodsForSubset(ws, pods, subsetName); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *ReconcileWorkloadSpread) deletePodsForSubset(ws *appsv1alpha1.WorkloadSpread,
-	pods []*corev1.Pod, subsetName string) error {
-	for _, pod := range pods {
-		if err := r.Client.Delete(context.TODO(), pod); err != nil {
-			r.recorder.Eventf(ws, corev1.EventTypeWarning,
-				"DeletePodFailed",
-				"Failed to delete unschedulabe Pod %s/%s in Subset %s of WorkloadSpread %s/%s",
-				pod.Namespace, pod.Name, subsetName, ws.Namespace, ws.Name)
-			return err
-		}
-		klog.V(3).Infof("WorkloadSpread (%s/%s) delete unschedulabe Pod (%s/%s) in Subset %s successfully",
-			ws.Namespace, ws.Name, pod.Namespace, pod.Name, subsetName)
-	}
-	return nil
 }
 
 // PodUnscheduledTimeout return true when Pod was scheduled failed and timeout.

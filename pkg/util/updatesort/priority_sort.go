@@ -66,7 +66,6 @@ func (ps *prioritySort) compare(podI, podJ map[string]string, defaultVal bool) b
 	}
 	return defaultVal
 }
-
 func (ps *prioritySort) getPodWeightPriority(podLabels map[string]string) int64 {
 	var weight int64
 	for _, p := range ps.strategy.WeightPriority {

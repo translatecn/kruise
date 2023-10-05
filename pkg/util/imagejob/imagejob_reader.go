@@ -26,7 +26,7 @@ import (
 	sortingcontrol "github.com/openkruise/kruise/pkg/control/sorting"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
+	fieldindex "github.com/openkruise/kruise/pkg/util/fieldindex"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,95 +62,6 @@ func writeCache(job *appsv1alpha1.ImagePullJob, nodeImages []*appsv1alpha1.NodeI
 	cacheLock.Lock()
 	defer cacheLock.Unlock()
 	cachedNodeImages[string(job.UID)] = names
-}
-
-func GetNodeImagesForJob(reader client.Reader, job *appsv1alpha1.ImagePullJob) (nodeImages []*appsv1alpha1.NodeImage, err error) {
-	defer func() {
-		if err == nil {
-			writeCache(job, nodeImages)
-		}
-	}()
-
-	if job.Spec.PodSelector != nil {
-		selector, err := util.ValidatedLabelSelectorAsSelector(&job.Spec.PodSelector.LabelSelector)
-		if err != nil {
-			return nil, fmt.Errorf("parse podSelector error: %v", err)
-		}
-
-		podList := &v1.PodList{}
-		if err := reader.List(context.TODO(), podList, client.InNamespace(job.Namespace), client.MatchingLabelsSelector{Selector: selector}, utilclient.DisableDeepCopy); err != nil {
-			return nil, err
-		}
-
-		pods := make([]*v1.Pod, 0, len(podList.Items))
-		for i := range podList.Items {
-			pod := &podList.Items[i]
-			if !kubecontroller.IsPodActive(pod) || pod.Spec.NodeName == "" {
-				continue
-			}
-			pods = append(pods, pod)
-		}
-
-		owner := metav1.GetControllerOf(job)
-		if owner != nil {
-			newPods, err := sortingcontrol.SortPods(reader, job.Namespace, *owner, pods)
-			if err != nil {
-				klog.Errorf("ImagePullJob %s/%s failed to sort Pods: %v", job.Namespace, job.Name, err)
-			} else {
-				pods = newPods
-			}
-		}
-
-		nodeImageNames := sets.NewString()
-		for _, pod := range pods {
-			if nodeImageNames.Has(pod.Spec.NodeName) {
-				continue
-			}
-			nodeImageNames.Insert(pod.Spec.NodeName)
-			nodeImage := &appsv1alpha1.NodeImage{}
-			if err := reader.Get(context.TODO(), types.NamespacedName{Name: pod.Spec.NodeName}, nodeImage); err != nil {
-				if errors.IsNotFound(err) {
-					klog.Warningf("Get NodeImages for ImagePullJob %s/%s, find Pod %s on Node %s but NodeImage not found",
-						job.Namespace, job.Name, pod.Name, pod.Spec.NodeName)
-					continue
-				}
-				return nil, err
-			}
-			nodeImages = append(nodeImages, nodeImage)
-		}
-		return nodeImages, nil
-	}
-
-	nodeImageList := &appsv1alpha1.NodeImageList{}
-	if job.Spec.Selector == nil {
-		if err := reader.List(context.TODO(), nodeImageList, utilclient.DisableDeepCopy); err != nil {
-			return nil, err
-		}
-		return convertNodeImages(nodeImageList), err
-	}
-
-	if job.Spec.Selector.Names != nil {
-		for _, name := range job.Spec.Selector.Names {
-			var nodeImage appsv1alpha1.NodeImage
-			if err := reader.Get(context.TODO(), types.NamespacedName{Name: name}, &nodeImage); err != nil {
-				if errors.IsNotFound(err) {
-					continue
-				}
-				return nil, fmt.Errorf("get specific NodeImage %s error: %v", name, err)
-			}
-			nodeImages = append(nodeImages, &nodeImage)
-		}
-		return nodeImages, nil
-	}
-
-	selector, err := util.ValidatedLabelSelectorAsSelector(&job.Spec.Selector.LabelSelector)
-	if err != nil {
-		return nil, fmt.Errorf("parse selector error: %v", err)
-	}
-	if err := reader.List(context.TODO(), nodeImageList, client.MatchingLabelsSelector{Selector: selector}, utilclient.DisableDeepCopy); err != nil {
-		return nil, err
-	}
-	return convertNodeImages(nodeImageList), err
 }
 
 func convertNodeImages(nodeImageList *appsv1alpha1.NodeImageList) []*appsv1alpha1.NodeImage {
@@ -275,4 +186,92 @@ func SortStatusImageTags(imageStatus *appsv1alpha1.ImageStatus) {
 	sort.Slice(imageStatus.Tags, func(i, j int) bool {
 		return imageStatus.Tags[i].Tag <= imageStatus.Tags[j].Tag
 	})
+}
+func GetNodeImagesForJob(reader client.Reader, job *appsv1alpha1.ImagePullJob) (nodeImages []*appsv1alpha1.NodeImage, err error) {
+	defer func() {
+		if err == nil {
+			writeCache(job, nodeImages)
+		}
+	}()
+
+	if job.Spec.PodSelector != nil {
+		selector, err := util.ValidatedLabelSelectorAsSelector(&job.Spec.PodSelector.LabelSelector)
+		if err != nil {
+			return nil, fmt.Errorf("parse podSelector error: %v", err)
+		}
+
+		podList := &v1.PodList{}
+		if err := reader.List(context.TODO(), podList, client.InNamespace(job.Namespace), client.MatchingLabelsSelector{Selector: selector}, utilclient.DisableDeepCopy); err != nil {
+			return nil, err
+		}
+
+		pods := make([]*v1.Pod, 0, len(podList.Items))
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if !kubecontroller.IsPodActive(pod) || pod.Spec.NodeName == "" {
+				continue
+			}
+			pods = append(pods, pod)
+		}
+
+		owner := metav1.GetControllerOf(job)
+		if owner != nil {
+			newPods, err := sortingcontrol.SortPods(reader, job.Namespace, *owner, pods)
+			if err != nil {
+				klog.Errorf("ImagePullJob %s/%s failed to sort Pods: %v", job.Namespace, job.Name, err)
+			} else {
+				pods = newPods
+			}
+		}
+
+		nodeImageNames := sets.NewString()
+		for _, pod := range pods {
+			if nodeImageNames.Has(pod.Spec.NodeName) {
+				continue
+			}
+			nodeImageNames.Insert(pod.Spec.NodeName)
+			nodeImage := &appsv1alpha1.NodeImage{}
+			if err := reader.Get(context.TODO(), types.NamespacedName{Name: pod.Spec.NodeName}, nodeImage); err != nil {
+				if errors.IsNotFound(err) {
+					klog.Warningf("Get NodeImages for ImagePullJob %s/%s, find Pod %s on Node %s but NodeImage not found",
+						job.Namespace, job.Name, pod.Name, pod.Spec.NodeName)
+					continue
+				}
+				return nil, err
+			}
+			nodeImages = append(nodeImages, nodeImage)
+		}
+		return nodeImages, nil
+	}
+
+	nodeImageList := &appsv1alpha1.NodeImageList{}
+	if job.Spec.Selector == nil {
+		if err := reader.List(context.TODO(), nodeImageList, utilclient.DisableDeepCopy); err != nil {
+			return nil, err
+		}
+		return convertNodeImages(nodeImageList), err
+	}
+
+	if job.Spec.Selector.Names != nil {
+		for _, name := range job.Spec.Selector.Names {
+			var nodeImage appsv1alpha1.NodeImage
+			if err := reader.Get(context.TODO(), types.NamespacedName{Name: name}, &nodeImage); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return nil, fmt.Errorf("get specific NodeImage %s error: %v", name, err)
+			}
+			nodeImages = append(nodeImages, &nodeImage)
+		}
+		return nodeImages, nil
+	}
+
+	selector, err := util.ValidatedLabelSelectorAsSelector(&job.Spec.Selector.LabelSelector)
+	if err != nil {
+		return nil, fmt.Errorf("parse selector error: %v", err)
+	}
+	if err := reader.List(context.TODO(), nodeImageList, client.MatchingLabelsSelector{Selector: selector}, utilclient.DisableDeepCopy); err != nil {
+		return nil, err
+	}
+	return convertNodeImages(nodeImageList), err
 }

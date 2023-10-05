@@ -33,7 +33,7 @@ import (
 
 	alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/apis/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
+	refmanager "github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
 type AdvancedStatefulSetAdapter struct {

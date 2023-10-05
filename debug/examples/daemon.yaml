@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: t
+  labels:
+    app: t
+spec:
+  selector:
+    matchLabels:
+      app: t
+  template:
+    metadata:
+      labels:
+        app: t
+    spec:
+      containers:
+        - name: daemon
+          image: centos:7
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "sleep 1234"

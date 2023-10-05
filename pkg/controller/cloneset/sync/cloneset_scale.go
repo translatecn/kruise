@@ -33,9 +33,9 @@ import (
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/expectations"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/revision"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
+	revision "github.com/openkruise/kruise/pkg/util/revision"
 )
 
 const (
@@ -216,7 +216,7 @@ func (r *realControl) createPods(
 		if clonesetutils.EqualToRevisionHash("", pod, currentRevision) {
 			cs = currentCS
 		}
-		lifecycle.SetPodLifecycle(appspub.LifecycleStatePreparingNormal)(pod)
+		lifecycle.SetPodLifecycle(appspub.LifecycleStatePreparingNormal)(pod) // ✅
 
 		var createErr error
 		if createErr = r.createOnePod(cs, pod, existingPVCNames); createErr != nil {
@@ -263,49 +263,6 @@ func (r *realControl) createOnePod(cs *appsv1alpha1.CloneSet, pod *v1.Pod, exist
 
 	r.recorder.Eventf(cs, v1.EventTypeNormal, "SuccessfulCreate", "succeed to create pod %s", pod.Name)
 	return nil
-}
-
-func (r *realControl) deletePods(cs *appsv1alpha1.CloneSet, podsToDelete []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) (bool, error) {
-	var modified bool
-	for _, pod := range podsToDelete {
-		if cs.Spec.Lifecycle != nil && lifecycle.IsPodHooked(cs.Spec.Lifecycle.PreDelete, pod) {
-			markPodNotReady := cs.Spec.Lifecycle.PreDelete.MarkPodNotReady
-			if updated, gotPod, err := r.lifecycleControl.UpdatePodLifecycle(pod, appspub.LifecycleStatePreparingDelete, markPodNotReady); err != nil {
-				return false, err
-			} else if updated {
-				klog.V(3).Infof("CloneSet %s scaling update pod %s lifecycle to PreparingDelete",
-					clonesetutils.GetControllerKey(cs), pod.Name)
-				modified = true
-				clonesetutils.ResourceVersionExpectations.Expect(gotPod)
-			}
-			continue
-		}
-
-		clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
-		if err := r.Delete(context.TODO(), pod); err != nil {
-			clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
-			r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pod %s: %v", pod.Name, err)
-			return modified, err
-		}
-		modified = true
-		r.recorder.Event(cs, v1.EventTypeNormal, "SuccessfulDelete", fmt.Sprintf("succeed to delete pod %s", pod.Name))
-
-		// delete pvcs which have the same instance-id
-		for _, pvc := range pvcs {
-			if pvc.Labels[appsv1alpha1.CloneSetInstanceID] != pod.Labels[appsv1alpha1.CloneSetInstanceID] {
-				continue
-			}
-
-			clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
-			if err := r.Delete(context.TODO(), pvc); err != nil {
-				clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
-				r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pvc %s: %v", pvc.Name, err)
-				return modified, err
-			}
-		}
-	}
-
-	return modified, nil
 }
 
 func getPlannedDeletedPods(cs *appsv1alpha1.CloneSet, pods []*v1.Pod) ([]*v1.Pod, []*v1.Pod, int) {
@@ -366,6 +323,49 @@ func getOrGenInstanceID(existingIDs, availableIDs sets.String) string {
 		}
 	}
 	return id
+}
+
+func (r *realControl) deletePods(cs *appsv1alpha1.CloneSet, podsToDelete []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) (bool, error) {
+	var modified bool
+	for _, pod := range podsToDelete {
+		if cs.Spec.Lifecycle != nil && lifecycle.IsPodHooked(cs.Spec.Lifecycle.PreDelete, pod) {
+			markPodNotReady := cs.Spec.Lifecycle.PreDelete.MarkPodNotReady
+			if updated, gotPod, err := r.lifecycleControl.UpdatePodLifecycle(pod, appspub.LifecycleStatePreparingDelete, markPodNotReady); err != nil {
+				return false, err
+			} else if updated {
+				klog.V(3).Infof("CloneSet %s scaling update pod %s lifecycle to PreparingDelete",
+					clonesetutils.GetControllerKey(cs), pod.Name)
+				modified = true
+				clonesetutils.ResourceVersionExpectations.Expect(gotPod)
+			}
+			continue
+		}
+
+		clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
+		if err := r.Delete(context.TODO(), pod); err != nil {
+			clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pod.Name)
+			r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pod %s: %v", pod.Name, err)
+			return modified, err
+		}
+		modified = true
+		r.recorder.Event(cs, v1.EventTypeNormal, "SuccessfulDelete", fmt.Sprintf("succeed to delete pod %s", pod.Name))
+
+		// delete pvcs which have the same instance-id
+		for _, pvc := range pvcs {
+			if pvc.Labels[appsv1alpha1.CloneSetInstanceID] != pod.Labels[appsv1alpha1.CloneSetInstanceID] {
+				continue
+			}
+
+			clonesetutils.ScaleExpectations.ExpectScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
+			if err := r.Delete(context.TODO(), pvc); err != nil {
+				clonesetutils.ScaleExpectations.ObserveScale(clonesetutils.GetControllerKey(cs), expectations.Delete, pvc.Name)
+				r.recorder.Eventf(cs, v1.EventTypeWarning, "FailedDelete", "failed to delete pvc %s: %v", pvc.Name, err)
+				return modified, err
+			}
+		}
+	}
+
+	return modified, nil
 }
 
 func (r *realControl) choosePodsToDelete(cs *appsv1alpha1.CloneSet, totalDiff int, currentRevDiff int, notUpdatedPods, updatedPods []*v1.Pod) []*v1.Pod {

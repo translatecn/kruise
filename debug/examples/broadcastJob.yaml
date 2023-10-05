@@ -1,0 +1,17 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: BroadcastJob
+metadata:
+  name: broadcastjob-ttl
+spec:
+  template:
+    spec:
+      containers:
+        - name: pi
+          image: registry.cn-hangzhou.aliyuncs.com/acejilam/tensorflow:latest-gpu
+      restartPolicy: OnFailure
+  completionPolicy:
+    type: Always
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 300  #  在完成之后的存活时间
+  paused: false
+  parallelism: 3

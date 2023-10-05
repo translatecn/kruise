@@ -1,0 +1,42 @@
+echo 'kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+featureGates:
+  "EphemeralContainers": true
+nodes:
+- role: control-plane
+  image: kindest/node:v1.26.0
+  extraPortMappings:
+  - containerPort: 6443
+    hostPort: 6443
+    protocol: TCP
+- role: worker
+  image: kindest/node:v1.26.0
+  labels:
+    zone: c
+' >/tmp/kind.yaml
+
+kind create cluster --config /tmp/kind.yaml
+kubectl cluster-info --context kind-kind
+
+helm install kruise openkruise/kruise --version 1.4.0
+
+
+echo 'apiVersion: apps.kruise.io/v1alpha1
+kind: BroadcastJob
+metadata:
+  name: broadcastjob-ttl
+spec:
+  template:
+    spec:
+      containers:
+        - name: pi
+          image: registry.cn-hangzhou.aliyuncs.com/acejilam/tensorflow:latest-gpu
+      restartPolicy: OnFailure
+  completionPolicy:
+    type: Always
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 300
+  paused: false
+  parallelism: 3
+' >/tmp/bcj.yaml
+kubectl apply -f /tmp/bcj.yaml

@@ -1,0 +1,22 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: ResourceDistribution
+metadata:
+  name: secret-distribution
+spec:
+  resource:
+    apiVersion: v1
+    kind: Secret # We will validate and limit the kind of the resource
+    metadata:
+      name: secret-sa-sample
+      ownerReferences: # written by `ResourceDistribution` automatically
+        ...
+      annotations: # written by `ResourceDistribution` automatically
+        openKruise.io/resource-distributed-by: "resource-distribution:secret-distribution"
+        openKruise.io/resource-distributed-time: "2021-07-20T03:00:00"
+    type: kubernetes.io/service-account-token
+    data:
+      extra: YmFyCg==
+  targets: # options: ["cluster", "namespaces", "namespaceLabelSelector"]
+    excludedNamespaces: #all namespaces will be selected, except for kube-system, kube-public and the listed namespaces.
+       - Name: some-ignored-ns-1
+       - Name: some-ignored-ns-2

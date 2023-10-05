@@ -1,0 +1,93 @@
+label:
+  "controller.kubernetes.io/pod-deletion-cost": 10
+  "apps.kruise.io/pre-predownload-created": "true"
+  "apps.kruise.io/image-predownload-ignored": "true"
+  "apps.kruise.io/subset-patch": "a"
+  "apps.kruise.io/subset-name": "true"
+  "apps.kruise.io/controller-revision-hash": "true"
+  "apps.kruise.io/container-launch-priority": 1
+  "apps.kruise.io/ephemeralcontainers-cleanup": 1
+  "apps.kruise.io/cloneset-instance-id": 1
+  "apps.kruise.io/cloneset-scaling-exclude-preparing-delete": 1
+  "apps.kruise.io/image-predownload-parallelism": 1
+  "apps.kruise.io/image-predownload-timeout-seconds": 1
+  "apps.kruise.io/image-predownload-min-updated-ready-pods": 1
+
+  # 原地升级
+  "apps.kruise.io/inplace-update-state": InPlaceUpdateState
+  "apps.kruise.io/inplace-update-grace": UpdateSpec
+  "apps.kruise.io/runtime-containers-meta": RuntimeContainerMetaSet
+
+
+  "apps.kruise.io/specified-delete": true
+  "apps.kruise.io/fake-nodeimage": 1
+  "apps.kruise.io/foo": 1
+  "apps.kruise.io/bar": 1
+  "apps.kruise.io/matched-workloadspread": 1
+  "apps.kruise.io/scheduled-at": 1
+  "apps.kruise.io/schedule-required": 1
+  "apps.kruise.io/schedule-preferred": 1
+  "apps.kruise.io/is-test": 1
+  "apps.kruise.io/is-unit-test": 1
+  "apps.kruise.io/toleration": 1
+  "apps.kruise.io/patch-label": 1
+  "apps.kruise.io/patch-annotation": 1
+  "apps.kruise.io/pulling-image-by": 1
+
+
+
+  "kruise.io/sidecarset-injected-list": a,b # 此pod 由那几个sidecarset 注入了
+  "kruise.io/sidecarset-working-hotupgrade-container": "{container.Name:?}" # 记录即将要热升级的sidecars, mesh -> mesh-1, envoy -> envoy-2
+  "kruise.io/sidecarset-hash": "{sidecarSetName:SidecarSetUpgradeSpec}" # pod:此pod 由那几个sidecarset 注入的，版本信息 ,set:随机值
+  "kruise.io/sidecarset-inplace-update-state": "map[sidecarSetName]*pub.InPlaceUpdateState"
+  "apps.kruise.io/sidecarset-custom-version": 1 # ControllerRevision、SidecarSet
+  "kruise.io/sidecarset-name": 1 # ControllerRevision 再用
+  "version.sidecarset.kruise.io/emptyContainer-A": "sidecarSet.ResourceVersion"
+  "versionalt.sidecarset.kruise.io/emptyContainer-A": "上一个sidecarSet.ResourceVersion"
+  "versionalt.sidecarset.kruise.io/workContainer": "sidecarSet.ResourceVersion"
+
+  "kruise.io/sidecarset-hash-without-image": xxxx # {sidecarSetName:sidecarSet.Spec.Containers没有image 的hash}
+
+
+#   if containerImage[emptyContainer] != sidecar.UpgradeStrategy.HotUpgradeEmptyImage 且都已经ready
+#   emptyContainer容器不是empty镜像,达到稳态,
+#       将emptyContainer 容器的 image
+#       更新声明中的全部      "version.sidecarset.kruise.io/emptyContainer": "0"
+#       更新声明中的全部      "versionalt.sidecarset.kruise.io/workContainer": "0"
+#       更新声明中的全部      kruise.io/sidecarset-inplace-update-state 单个sidecar中 空empty容器的状态
+#
+#
+# 1、根据规则找到 需要更新 注入的pod (没有更新中的  pod 中记录的hash 是sidecarset 更新前的hash值)
+# 2、根据权重、对要注入的pod 进行排序
+# 3、截取相应的要更新的pod (子集)
+#     3.1 遍历要更新的pod                      updatePodSidecarAndHash
+#       - 遍历 sidecarset  containers
+#         - 检查是否允许共享pod volume
+#         - 遍历pod 所有容器是否有 IS_INJECTED=true 环境变量
+#         - 如果没有, 则和 sidecar 共享所有挂载的volume ,以及相应的env
+#         - 变更emptyContainer 为新的image
+#         - 变更 kruise.io/sidecarset-working-hotupgrade-container :{sidecarName: newContainer.Name}
+#         - 变更 version.sidecarset.kruise.io/emptyContainer-A": "sidecarSet.ResourceVersion"
+#         - 变更 versionalt.sidecarset.kruise.io/emptyContainer-A": "上一个sidecarSet.ResourceVersion"
+#         - 变更 versionalt.sidecarset.kruise.io/workContainer": "sidecarSet.ResourceVersion"
+#     
+#     3.2 更新 Annotations
+#         - kruise.io/sidecarset-hash-without-image
+#         - kruise.io/sidecarset-hash
+#     3.3 填充 PatchPodMetadata
+#         - kruise.io/sidecarset-inplace-update-state     // 记录更新前的image id
+# 4、更新符合sidecar规则的，将记录写到pod  Annotations
+#     - kruise.io/sidecarset-injected-list
+# 5、将sidecar 里的patch 规则 应用
+# 6、update pod
+# 7、检查condition 更新pod status
+#
+# - [emptyContainer, workContainer]
+# - [workContainer,emptyContainer]
+# - [workContainer,workContainer] 返回没有ready的
+# - [workContainer,workContainer] 都ready了，返回声明中
+
+
+
+ENV :
+  KRUISE_CONTAINER_BARRIER: 容器优先级

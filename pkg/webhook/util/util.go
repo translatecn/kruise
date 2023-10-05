@@ -62,7 +62,7 @@ func GetCertDir() string {
 	if p := os.Getenv("WEBHOOK_CERT_DIR"); len(p) > 0 {
 		return p
 	}
-	return "/tmp/kruise-webhook-certs"
+	return "./certs"
 }
 
 func GetCertWriter() string {

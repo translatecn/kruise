@@ -24,9 +24,10 @@ import (
 	"os"
 	"path"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/generator"
+
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/kruise/pkg/webhook/util/generator"
 	"github.com/openkruise/kruise/pkg/webhook/util/writer/atomic"
 )
 
@@ -63,16 +64,6 @@ func (ops *FSCertWriterOptions) validate() error {
 		return errors.New("path must be set in FSCertWriterOptions")
 	}
 	return nil
-}
-
-// NewFSCertWriter constructs a CertWriter that persists the certificate on filesystem.
-func NewFSCertWriter(ops FSCertWriterOptions) (CertWriter, error) {
-	ops.setDefaults()
-	err := ops.validate()
-	if err != nil {
-		return nil, err
-	}
-	return &fsCertWriter{FSCertWriterOptions: &ops}, nil
 }
 
 // EnsureCert provisions certificates for a webhookClientConfig by writing the certificates in the filesystem.
@@ -226,4 +217,14 @@ func certToProjectionMap(cert *generator.Artifacts) map[string]atomic.FileProjec
 			Mode: 0666,
 		},
 	}
+}
+
+// NewFSCertWriter constructs a CertWriter that persists the certificate on filesystem.
+func NewFSCertWriter(ops FSCertWriterOptions) (CertWriter, error) {
+	ops.setDefaults()
+	err := ops.validate()
+	if err != nil {
+		return nil, err
+	}
+	return &fsCertWriter{FSCertWriterOptions: &ops}, nil
 }

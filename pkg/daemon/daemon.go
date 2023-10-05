@@ -23,12 +23,15 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/openkruise/kruise/pkg/daemon/containerrecreate"
+	"github.com/openkruise/kruise/pkg/daemon/imagepuller"
+
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
 	kruiseapis "github.com/openkruise/kruise/apis"
 	"github.com/openkruise/kruise/pkg/client"
 	"github.com/openkruise/kruise/pkg/daemon/containermeta"
-	"github.com/openkruise/kruise/pkg/daemon/containerrecreate"
 	daemonruntime "github.com/openkruise/kruise/pkg/daemon/criruntime"
-	"github.com/openkruise/kruise/pkg/daemon/imagepuller"
 	daemonoptions "github.com/openkruise/kruise/pkg/daemon/options"
 	"github.com/openkruise/kruise/pkg/daemon/podprobe"
 	daemonutil "github.com/openkruise/kruise/pkg/daemon/util"
@@ -57,8 +60,8 @@ var (
 )
 
 func init() {
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = kruiseapis.AddToScheme(scheme)
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(kruiseapis.AddToScheme(scheme))
 }
 
 // Runnable allows a component to be started.

@@ -17,7 +17,7 @@ limitations under the License.
 package webhook
 
 import (
-	"github.com/openkruise/kruise/pkg/webhook/builtinworkloads/validating"
+	"github.com/openkruise/kruise/pkg/webhook/delete_builtinworkloads/validating"
 )
 
 func init() {

@@ -256,24 +256,6 @@ func MergeVolumeMountsInContainer(origin *v1.Container, other v1.Container) {
 	}
 }
 
-func IsPodOwnedByKruise(pod *v1.Pod) bool {
-	ownerRef := metav1.GetControllerOf(pod)
-	if ownerRef == nil {
-		return false
-	}
-	gv, _ := schema.ParseGroupVersion(ownerRef.APIVersion)
-	return gv.Group == appsv1alpha1.GroupVersion.Group
-}
-
-func InjectReadinessGateToPod(pod *v1.Pod, conditionType v1.PodConditionType) {
-	for _, g := range pod.Spec.ReadinessGates {
-		if g.ConditionType == conditionType {
-			return
-		}
-	}
-	pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, v1.PodReadinessGate{ConditionType: conditionType})
-}
-
 func ContainsObjectRef(slice []v1.ObjectReference, obj v1.ObjectReference) bool {
 	for _, o := range slice {
 		if o.UID == obj.UID {
@@ -342,4 +324,20 @@ func SetPodReadyCondition(pod *v1.Pod) {
 	}
 
 	SetPodCondition(pod, newPodReady)
+}
+func IsPodOwnedByKruise(pod *v1.Pod) bool {
+	ownerRef := metav1.GetControllerOf(pod)
+	if ownerRef == nil {
+		return false
+	}
+	gv, _ := schema.ParseGroupVersion(ownerRef.APIVersion)
+	return gv.Group == appsv1alpha1.GroupVersion.Group
+}
+func InjectReadinessGateToPod(pod *v1.Pod, conditionType v1.PodConditionType) {
+	for _, g := range pod.Spec.ReadinessGates {
+		if g.ConditionType == conditionType {
+			return
+		}
+	}
+	pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, v1.PodReadinessGate{ConditionType: conditionType})
 }

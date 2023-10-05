@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	wsutil "github.com/openkruise/kruise/pkg/util/workloadspread"
 )
 

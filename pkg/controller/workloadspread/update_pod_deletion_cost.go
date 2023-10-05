@@ -33,9 +33,33 @@ import (
 	wsutil "github.com/openkruise/kruise/pkg/util/workloadspread"
 )
 
-func (r *ReconcileWorkloadSpread) updateDeletionCost(ws *appsv1alpha1.WorkloadSpread,
-	podMap map[string][]*corev1.Pod,
-	workloadReplicas int32) error {
+func (r *ReconcileWorkloadSpread) patchPodDeletionCost(ws *appsv1alpha1.WorkloadSpread,
+	pod *corev1.Pod, deletionCostStr string) error {
+	clone := pod.DeepCopy()
+	annotationKey := wsutil.PodDeletionCostAnnotation
+	annotationValue := deletionCostStr
+
+	podAnnotation := pod.GetAnnotations()
+	oldValue, exist := podAnnotation[annotationKey]
+	// annotation has been set
+	if exist && annotationValue == oldValue {
+		return nil
+	}
+	// keep the original setting.
+	if !exist && annotationValue == "0" {
+		return nil
+	}
+
+	body := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, annotationKey, annotationValue)
+	if err := r.Patch(context.TODO(), clone, client.RawPatch(types.StrategicMergePatchType, []byte(body))); err != nil {
+		return err
+	}
+	klog.V(3).Infof("WorkloadSpread (%s/%s) paths deletion-cost annotation to %s for Pod (%s/%s) successfully",
+		ws.Namespace, ws.Name, deletionCostStr, pod.Namespace, pod.Name)
+	return nil
+}
+
+func (r *ReconcileWorkloadSpread) updateDeletionCost(ws *appsv1alpha1.WorkloadSpread, podMap map[string][]*corev1.Pod, workloadReplicas int32) error {
 	targetRef := ws.Spec.TargetReference
 	if targetRef == nil || !isEffectiveKindForDeletionCost(targetRef) {
 		return nil
@@ -56,6 +80,36 @@ func (r *ReconcileWorkloadSpread) updateDeletionCost(ws *appsv1alpha1.WorkloadSp
 	return nil
 }
 
+func sortDeleteIndexes(pods []*corev1.Pod) []int {
+	waitDeleteIndexes := make([]int, 0, len(pods))
+	for i := 0; i < len(pods); i++ {
+		waitDeleteIndexes = append(waitDeleteIndexes, i)
+	}
+
+	// Sort Pods with default sequence
+	//	- Unassigned < assigned
+	//	- PodPending < PodUnknown < PodRunning
+	//	- Not ready < ready
+	//	- Been ready for empty time < less time < more time
+	//	- Pods with containers with higher restart counts < lower restart counts
+	//	- Empty creation time pods < newer pods < older pods
+
+	// Using SliceStable to keep equal elements in their original order. It can avoid frequently update.
+	sort.SliceStable(waitDeleteIndexes, func(i, j int) bool {
+		return kubecontroller.ActivePods(pods).Less(waitDeleteIndexes[i], waitDeleteIndexes[j])
+	})
+
+	return waitDeleteIndexes
+}
+
+func isEffectiveKindForDeletionCost(targetRef *appsv1alpha1.TargetReference) bool {
+	switch targetRef.Kind {
+	case controllerKindRS.Kind, controllerKindDep.Kind, controllerKruiseKindCS.Kind:
+		return true
+	}
+	return false
+}
+
 // syncSubsetPodDeletionCost calculates the deletion-cost for the Pods belong to subset and update deletion-cost annotation.
 // We have two conditions for subset's Pod deletion-cost
 //  1. the number of active Pods in this subset <= maxReplicas or maxReplicas = nil, deletion-cost = 100 * (subsets.length - subsetIndex).
@@ -72,12 +126,7 @@ func (r *ReconcileWorkloadSpread) updateDeletionCost(ws *appsv1alpha1.WorkloadSp
 //     maxReplicas    10            10           nil
 //     pods number    20            20           20
 //     deletion-cost (300,-100)    (200,-200)    100
-func (r *ReconcileWorkloadSpread) syncSubsetPodDeletionCost(
-	ws *appsv1alpha1.WorkloadSpread,
-	subset *appsv1alpha1.WorkloadSpreadSubset,
-	subsetIndex int,
-	pods []*corev1.Pod,
-	workloadReplicas int32) error {
+func (r *ReconcileWorkloadSpread) syncSubsetPodDeletionCost(ws *appsv1alpha1.WorkloadSpread, subset *appsv1alpha1.WorkloadSpreadSubset, subsetIndex int, pods []*corev1.Pod, workloadReplicas int32) error {
 	var err error
 	// slice that will contain all Pods that want to set deletion-cost a positive value.
 	var positivePods []*corev1.Pod
@@ -153,60 +202,4 @@ func (r *ReconcileWorkloadSpread) updateDeletionCostForSubsetPods(ws *appsv1alph
 		}
 	}
 	return nil
-}
-
-func (r *ReconcileWorkloadSpread) patchPodDeletionCost(ws *appsv1alpha1.WorkloadSpread,
-	pod *corev1.Pod, deletionCostStr string) error {
-	clone := pod.DeepCopy()
-	annotationKey := wsutil.PodDeletionCostAnnotation
-	annotationValue := deletionCostStr
-
-	podAnnotation := pod.GetAnnotations()
-	oldValue, exist := podAnnotation[annotationKey]
-	// annotation has been set
-	if exist && annotationValue == oldValue {
-		return nil
-	}
-	// keep the original setting.
-	if !exist && annotationValue == "0" {
-		return nil
-	}
-
-	body := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, annotationKey, annotationValue)
-	if err := r.Patch(context.TODO(), clone, client.RawPatch(types.StrategicMergePatchType, []byte(body))); err != nil {
-		return err
-	}
-	klog.V(3).Infof("WorkloadSpread (%s/%s) paths deletion-cost annotation to %s for Pod (%s/%s) successfully",
-		ws.Namespace, ws.Name, deletionCostStr, pod.Namespace, pod.Name)
-	return nil
-}
-
-func sortDeleteIndexes(pods []*corev1.Pod) []int {
-	waitDeleteIndexes := make([]int, 0, len(pods))
-	for i := 0; i < len(pods); i++ {
-		waitDeleteIndexes = append(waitDeleteIndexes, i)
-	}
-
-	// Sort Pods with default sequence
-	//	- Unassigned < assigned
-	//	- PodPending < PodUnknown < PodRunning
-	//	- Not ready < ready
-	//	- Been ready for empty time < less time < more time
-	//	- Pods with containers with higher restart counts < lower restart counts
-	//	- Empty creation time pods < newer pods < older pods
-
-	// Using SliceStable to keep equal elements in their original order. It can avoid frequently update.
-	sort.SliceStable(waitDeleteIndexes, func(i, j int) bool {
-		return kubecontroller.ActivePods(pods).Less(waitDeleteIndexes[i], waitDeleteIndexes[j])
-	})
-
-	return waitDeleteIndexes
-}
-
-func isEffectiveKindForDeletionCost(targetRef *appsv1alpha1.TargetReference) bool {
-	switch targetRef.Kind {
-	case controllerKindRS.Kind, controllerKindDep.Kind, controllerKruiseKindCS.Kind:
-		return true
-	}
-	return false
 }

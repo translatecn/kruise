@@ -20,13 +20,14 @@ import (
 	"context"
 	"fmt"
 
+	updatesort "github.com/openkruise/kruise/pkg/util/updatesort"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	synccontrol "github.com/openkruise/kruise/pkg/controller/cloneset/sync"
 	sidecarsetcontroller "github.com/openkruise/kruise/pkg/controller/sidecarset"
 	statefulsetcontroller "github.com/openkruise/kruise/pkg/controller/statefulset"
-	"github.com/openkruise/kruise/pkg/util/updatesort"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

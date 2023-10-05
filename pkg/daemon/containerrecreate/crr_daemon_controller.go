@@ -25,6 +25,9 @@ import (
 	"sort"
 	"time"
 
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/client"
 	kruiseclient "github.com/openkruise/kruise/pkg/client/clientset/versioned"
@@ -33,13 +36,11 @@ import (
 	"github.com/openkruise/kruise/pkg/daemon/kuberuntime"
 	daemonoptions "github.com/openkruise/kruise/pkg/daemon/options"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -68,239 +69,6 @@ type Controller struct {
 	crrLister      listersalpha1.ContainerRecreateRequestLister
 	eventRecorder  record.EventRecorder
 	runtimeFactory daemonruntime.Factory
-}
-
-// NewController returns the controller for CRR
-func NewController(opts daemonoptions.Options) (*Controller, error) {
-	genericClient := client.GetGenericClientWithName("kruise-daemon-crr")
-	informer := newCRRInformer(genericClient.KruiseClient, opts.NodeName)
-
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: genericClient.KubeClient.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(opts.Scheme, v1.EventSource{Component: "kruise-daemon-crr", Host: opts.NodeName})
-
-	queue := workqueue.NewNamedRateLimitingQueue(
-		// Backoff duration from 500ms to 50~55s
-		workqueue.NewItemExponentialFailureRateLimiter(500*time.Millisecond, 50*time.Second+time.Millisecond*time.Duration(rand.Intn(5000))),
-		"crr",
-	)
-
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
-			if ok {
-				enqueue(queue, crr)
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			crr, ok := newObj.(*appsv1alpha1.ContainerRecreateRequest)
-			if ok {
-				enqueue(queue, crr)
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
-			if ok {
-				resourceVersionExpectation.Delete(crr)
-			}
-		},
-	})
-
-	opts.Healthz.RegisterFunc("crrInformerSynced", func(_ *http.Request) error {
-		if !informer.HasSynced() {
-			return fmt.Errorf("not synced")
-		}
-		return nil
-	})
-
-	return &Controller{
-		queue:          queue,
-		runtimeClient:  opts.RuntimeClient,
-		crrInformer:    informer,
-		crrLister:      listersalpha1.NewContainerRecreateRequestLister(informer.GetIndexer()),
-		eventRecorder:  recorder,
-		runtimeFactory: opts.RuntimeFactory,
-	}, nil
-}
-
-func newCRRInformer(client kruiseclient.Interface, nodeName string) cache.SharedIndexInformer {
-	tweakListOptionsFunc := func(opt *metav1.ListOptions) {
-		opt.LabelSelector = fmt.Sprintf("%s=%s,%s=%s",
-			appsv1alpha1.ContainerRecreateRequestNodeNameKey, nodeName,
-			appsv1alpha1.ContainerRecreateRequestActiveKey, "true",
-		)
-	}
-
-	im := cache.NewSharedIndexInformer(
-		&cache.ListWatch{
-			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				tweakListOptionsFunc(&options)
-				return client.AppsV1alpha1().ContainerRecreateRequests(v1.NamespaceAll).List(context.TODO(), options)
-			},
-			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				tweakListOptionsFunc(&options)
-				return client.AppsV1alpha1().ContainerRecreateRequests(v1.NamespaceAll).Watch(context.TODO(), options)
-			},
-		},
-		&appsv1alpha1.ContainerRecreateRequest{},
-		0, // do not resync
-		cache.Indexers{CRRPodNameIndex: SpecPodNameIndexFunc, cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-	)
-	return im
-}
-
-func enqueue(queue workqueue.Interface, obj *appsv1alpha1.ContainerRecreateRequest) {
-	if obj.DeletionTimestamp != nil || obj.Status.CompletionTime != nil {
-		return
-	}
-	queue.Add(objectKey(obj))
-}
-
-func objectKey(obj *appsv1alpha1.ContainerRecreateRequest) string {
-	return obj.Namespace + "/" + obj.Spec.PodName
-}
-
-func (c *Controller) Run(stop <-chan struct{}) {
-	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
-
-	klog.Info("Starting informer for ContainerRecreateRequest")
-	go c.crrInformer.Run(stop)
-	if !cache.WaitForCacheSync(stop, c.crrInformer.HasSynced) {
-		return
-	}
-
-	klog.Infof("Starting crr daemon controller")
-	for i := 0; i < workers; i++ {
-		go wait.Until(func() {
-			for c.processNextWorkItem() {
-			}
-		}, time.Second, stop)
-	}
-
-	klog.Info("Started crr daemon controller successfully")
-	<-stop
-}
-
-// processNextWorkItem will read a single work item off the workqueue and
-// attempt to process it, by calling the syncHandler.
-func (c *Controller) processNextWorkItem() bool {
-	// pull the next work item from queue.  It should be a key we use to lookup
-	// something in a cache
-	key, quit := c.queue.Get()
-	if quit {
-		return false
-	}
-	defer c.queue.Done(key)
-
-	err := c.sync(key.(string))
-
-	if err == nil {
-		// No error, tell the queue to stop tracking history
-		c.queue.Forget(key)
-	} else {
-		// requeue the item to work on later
-		c.queue.AddRateLimited(key)
-	}
-
-	return true
-}
-
-func (c *Controller) sync(key string) (retErr error) {
-	namespace, podName, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		klog.Warningf("Invalid key: %s", key)
-		return nil
-	}
-
-	objectList, err := c.crrInformer.GetIndexer().ByIndex(CRRPodNameIndex, podName)
-	if err != nil {
-		return err
-	}
-
-	crrList := make([]*appsv1alpha1.ContainerRecreateRequest, 0, len(objectList))
-	for _, obj := range objectList {
-		crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
-		if ok && crr != nil && crr.Namespace == namespace {
-			crrList = append(crrList, crr)
-		}
-	}
-	if len(crrList) == 0 {
-		return nil
-	}
-
-	crr, err := c.pickRecreateRequest(crrList)
-	if err != nil || crr == nil {
-		return err
-	}
-
-	klog.V(3).Infof("Start syncing for %s/%s", namespace, crr.Name)
-	defer func() {
-		if retErr != nil {
-			klog.Errorf("Failed to sync for %s/%s: %v", namespace, crr.Name, retErr)
-		} else {
-			klog.V(3).Infof("Finished syncing for %s/%s", namespace, crr.Name)
-		}
-	}()
-
-	// once first update its phase to recreating
-	if crr.Status.Phase != appsv1alpha1.ContainerRecreateRequestRecreating {
-		return c.updateCRRPhase(crr, appsv1alpha1.ContainerRecreateRequestRecreating)
-	}
-
-	if crr.Spec.Strategy.UnreadyGracePeriodSeconds != nil {
-		unreadyTimeStr := crr.Annotations[appsv1alpha1.ContainerRecreateRequestUnreadyAcquiredKey]
-		if unreadyTimeStr == "" {
-			klog.Infof("CRR %s/%s is waiting for unready acquirement.", crr.Namespace, crr.Name)
-			return nil
-		}
-
-		unreadyTime, err := time.Parse(time.RFC3339, unreadyTimeStr)
-		if err != nil {
-			klog.Errorf("CRR %s/%s failed to parse unready time %s: %v", crr.Namespace, crr.Name, unreadyTimeStr, err)
-			return c.completeCRRStatus(crr, fmt.Sprintf("failed to parse unready time %s: %v", unreadyTimeStr, err))
-		}
-
-		leftTime := time.Duration(*crr.Spec.Strategy.UnreadyGracePeriodSeconds)*time.Second - time.Since(unreadyTime)
-		if leftTime > 0 {
-			klog.Infof("CRR %s/%s is waiting for unready grace period %v left time.", crr.Namespace, crr.Name, leftTime)
-			c.queue.AddAfter(crr.Namespace+"/"+crr.Spec.PodName, leftTime+100*time.Millisecond)
-			return nil
-		}
-	}
-
-	return c.manage(crr)
-}
-
-func (c *Controller) pickRecreateRequest(crrList []*appsv1alpha1.ContainerRecreateRequest) (*appsv1alpha1.ContainerRecreateRequest, error) {
-	sort.Sort(crrListByPhaseAndCreated(crrList))
-	var picked *appsv1alpha1.ContainerRecreateRequest
-	for _, crr := range crrList {
-		if crr.DeletionTimestamp != nil || crr.Status.CompletionTime != nil {
-			resourceVersionExpectation.Delete(crr)
-			continue
-		}
-
-		resourceVersionExpectation.Observe(crr)
-		if satisfied, duration := resourceVersionExpectation.IsSatisfied(crr); !satisfied {
-			if duration < maxExpectationWaitDuration {
-				break
-			}
-			klog.Warningf("Wait for CRR %s/%s resourceVersion expectation over %v", crr.Namespace, crr.Name, duration)
-			resourceVersionExpectation.Delete(crr)
-		}
-
-		// Only update non-picked CRR to Pending, for the picked one will directly update to Recreating
-		if picked == nil {
-			picked = crr
-		} else if crr.Status.Phase == "" {
-			if err := c.updateCRRPhase(crr, appsv1alpha1.ContainerRecreateRequestPending); err != nil {
-				klog.Errorf("Failed to update CRR %s/%s status to Pending: %v", crr.Namespace, crr.Name, err)
-				return nil, err
-			}
-		}
-	}
-	return picked, nil
 }
 
 func (c *Controller) manage(crr *appsv1alpha1.ContainerRecreateRequest) error {
@@ -383,46 +151,93 @@ func (c *Controller) manage(crr *appsv1alpha1.ContainerRecreateRequest) error {
 	return nil
 }
 
-func (c *Controller) patchCRRContainerRecreateStates(crr *appsv1alpha1.ContainerRecreateRequest, newCRRContainerRecreateStates []appsv1alpha1.ContainerRecreateRequestContainerRecreateState) error {
-	klog.V(3).Infof("CRR %s/%s patch containerRecreateStates: %v", crr.Namespace, crr.Name, util.DumpJSON(newCRRContainerRecreateStates))
-	crr = crr.DeepCopy()
-	body := fmt.Sprintf(`{"status":{"containerRecreateStates":%s}}`, util.DumpJSON(newCRRContainerRecreateStates))
-	oldRev := crr.ResourceVersion
-	defer func() {
-		if crr.ResourceVersion != oldRev {
-			resourceVersionExpectation.Expect(crr)
+// NewController returns the controller for CRR
+func NewController(opts daemonoptions.Options) (*Controller, error) {
+	genericClient := client.GetGenericClientWithName("kruise-daemon-crr")
+	informer := newCRRInformer(genericClient.KruiseClient, opts.NodeName)
+
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: genericClient.KubeClient.CoreV1().Events("")})
+	recorder := eventBroadcaster.NewRecorder(opts.Scheme, v1.EventSource{Component: "kruise-daemon-crr", Host: opts.NodeName})
+
+	queue := workqueue.NewNamedRateLimitingQueue(
+		// Backoff duration from 500ms to 50~55s
+		workqueue.NewItemExponentialFailureRateLimiter(500*time.Millisecond, 50*time.Second+time.Millisecond*time.Duration(rand.Intn(5000))),
+		"crr",
+	)
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
+			if ok {
+				enqueue(queue, crr)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			crr, ok := newObj.(*appsv1alpha1.ContainerRecreateRequest)
+			if ok {
+				enqueue(queue, crr)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
+			if ok {
+				resourceVersionExpectation.Delete(crr)
+			}
+		},
+	})
+
+	opts.Healthz.RegisterFunc("crrInformerSynced", func(_ *http.Request) error {
+		if !informer.HasSynced() {
+			return fmt.Errorf("not synced")
 		}
-	}()
-	return c.runtimeClient.Status().Patch(context.TODO(), crr, runtimeclient.RawPatch(types.MergePatchType, []byte(body)))
+		return nil
+	})
+
+	return &Controller{
+		queue:          queue,
+		runtimeClient:  opts.RuntimeClient,
+		crrInformer:    informer,
+		crrLister:      listersalpha1.NewContainerRecreateRequestLister(informer.GetIndexer()),
+		eventRecorder:  recorder,
+		runtimeFactory: opts.RuntimeFactory,
+	}, nil
+}
+func newCRRInformer(client kruiseclient.Interface, nodeName string) cache.SharedIndexInformer {
+	tweakListOptionsFunc := func(opt *metav1.ListOptions) {
+		opt.LabelSelector = fmt.Sprintf("%s=%s,%s=%s",
+			appsv1alpha1.ContainerRecreateRequestNodeNameKey, nodeName,
+			appsv1alpha1.ContainerRecreateRequestActiveKey, "true",
+		)
+	}
+
+	im := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				tweakListOptionsFunc(&options)
+				return client.AppsV1alpha1().ContainerRecreateRequests(v1.NamespaceAll).List(context.TODO(), options)
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				tweakListOptionsFunc(&options)
+				return client.AppsV1alpha1().ContainerRecreateRequests(v1.NamespaceAll).Watch(context.TODO(), options)
+			},
+		},
+		&appsv1alpha1.ContainerRecreateRequest{},
+		0, // do not resync
+		cache.Indexers{CRRPodNameIndex: SpecPodNameIndexFunc, cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+	)
+	return im
 }
 
-func (c *Controller) updateCRRPhase(crr *appsv1alpha1.ContainerRecreateRequest, phase appsv1alpha1.ContainerRecreateRequestPhase) error {
-	crr = crr.DeepCopy()
-	crr.Status.Phase = phase
-	oldRev := crr.ResourceVersion
-	defer func() {
-		if crr.ResourceVersion != oldRev {
-			resourceVersionExpectation.Expect(crr)
-		}
-	}()
-	return c.runtimeClient.Status().Update(context.TODO(), crr)
+func enqueue(queue workqueue.Interface, obj *appsv1alpha1.ContainerRecreateRequest) {
+	if obj.DeletionTimestamp != nil || obj.Status.CompletionTime != nil {
+		return
+	}
+	queue.Add(objectKey(obj))
 }
-
-func (c *Controller) completeCRRStatus(crr *appsv1alpha1.ContainerRecreateRequest, msg string) error {
-	crr = crr.DeepCopy()
-	now := metav1.Now()
-	crr.Status.Phase = appsv1alpha1.ContainerRecreateRequestCompleted
-	crr.Status.CompletionTime = &now
-	crr.Status.Message = msg
-	oldRev := crr.ResourceVersion
-	defer func() {
-		if crr.ResourceVersion != oldRev {
-			resourceVersionExpectation.Expect(crr)
-		}
-	}()
-	return c.runtimeClient.Status().Update(context.TODO(), crr)
+func objectKey(obj *appsv1alpha1.ContainerRecreateRequest) string {
+	return obj.Namespace + "/" + obj.Spec.PodName
 }
-
 func (c *Controller) newRuntimeManager(runtimeFactory daemonruntime.Factory, crr *appsv1alpha1.ContainerRecreateRequest) (kuberuntime.Runtime, error) {
 	var runtimeName string
 	for i := range crr.Spec.Containers {
@@ -450,4 +265,184 @@ func (c *Controller) newRuntimeManager(runtimeFactory daemonruntime.Factory, crr
 	}
 
 	return kuberuntime.NewGenericRuntime(runtimeName, runtimeService, c.eventRecorder, &http.Client{}), nil
+}
+func (c *Controller) Run(stop <-chan struct{}) {
+	defer utilruntime.HandleCrash()
+	defer c.queue.ShutDown()
+
+	klog.Info("Starting informer for ContainerRecreateRequest")
+	go c.crrInformer.Run(stop)
+	if !cache.WaitForCacheSync(stop, c.crrInformer.HasSynced) {
+		return
+	}
+
+	klog.Infof("Starting crr daemon controller")
+	for i := 0; i < workers; i++ {
+		go wait.Until(func() {
+			for c.processNextWorkItem() {
+			}
+		}, time.Second, stop)
+	}
+
+	klog.Info("Started crr daemon controller successfully")
+	<-stop
+}
+
+// processNextWorkItem will read a single work item off the workqueue and
+// attempt to process it, by calling the syncHandler.
+func (c *Controller) processNextWorkItem() bool {
+	// pull the next work item from queue.  It should be a key we use to lookup
+	// something in a cache
+	key, quit := c.queue.Get()
+	if quit {
+		return false
+	}
+	defer c.queue.Done(key)
+
+	err := c.sync(key.(string))
+
+	if err == nil {
+		// No error, tell the queue to stop tracking history
+		c.queue.Forget(key)
+	} else {
+		// requeue the item to work on later
+		c.queue.AddRateLimited(key)
+	}
+
+	return true
+}
+func (c *Controller) pickRecreateRequest(crrList []*appsv1alpha1.ContainerRecreateRequest) (*appsv1alpha1.ContainerRecreateRequest, error) {
+	sort.Sort(crrListByPhaseAndCreated(crrList))
+	var picked *appsv1alpha1.ContainerRecreateRequest
+	for _, crr := range crrList {
+		if crr.DeletionTimestamp != nil || crr.Status.CompletionTime != nil {
+			resourceVersionExpectation.Delete(crr)
+			continue
+		}
+
+		resourceVersionExpectation.Observe(crr)
+		if satisfied, duration := resourceVersionExpectation.IsSatisfied(crr); !satisfied {
+			if duration < maxExpectationWaitDuration {
+				break
+			}
+			klog.Warningf("Wait for CRR %s/%s resourceVersion expectation over %v", crr.Namespace, crr.Name, duration)
+			resourceVersionExpectation.Delete(crr)
+		}
+
+		// Only update non-picked CRR to Pending, for the picked one will directly update to Recreating
+		if picked == nil {
+			picked = crr
+		} else if crr.Status.Phase == "" {
+			if err := c.updateCRRPhase(crr, appsv1alpha1.ContainerRecreateRequestPending); err != nil {
+				klog.Errorf("Failed to update CRR %s/%s status to Pending: %v", crr.Namespace, crr.Name, err)
+				return nil, err
+			}
+		}
+	}
+	return picked, nil
+}
+func (c *Controller) updateCRRPhase(crr *appsv1alpha1.ContainerRecreateRequest, phase appsv1alpha1.ContainerRecreateRequestPhase) error {
+	crr = crr.DeepCopy()
+	crr.Status.Phase = phase
+	oldRev := crr.ResourceVersion
+	defer func() {
+		if crr.ResourceVersion != oldRev {
+			resourceVersionExpectation.Expect(crr)
+		}
+	}()
+	return c.runtimeClient.Status().Update(context.TODO(), crr)
+}
+
+func (c *Controller) completeCRRStatus(crr *appsv1alpha1.ContainerRecreateRequest, msg string) error {
+	crr = crr.DeepCopy()
+	now := metav1.Now()
+	crr.Status.Phase = appsv1alpha1.ContainerRecreateRequestCompleted
+	crr.Status.CompletionTime = &now
+	crr.Status.Message = msg
+	oldRev := crr.ResourceVersion
+	defer func() {
+		if crr.ResourceVersion != oldRev {
+			resourceVersionExpectation.Expect(crr)
+		}
+	}()
+	return c.runtimeClient.Status().Update(context.TODO(), crr)
+}
+
+func (c *Controller) patchCRRContainerRecreateStates(crr *appsv1alpha1.ContainerRecreateRequest, newCRRContainerRecreateStates []appsv1alpha1.ContainerRecreateRequestContainerRecreateState) error {
+	klog.V(3).Infof("CRR %s/%s patch containerRecreateStates: %v", crr.Namespace, crr.Name, util.DumpJSON(newCRRContainerRecreateStates))
+	crr = crr.DeepCopy()
+	body := fmt.Sprintf(`{"status":{"containerRecreateStates":%s}}`, util.DumpJSON(newCRRContainerRecreateStates))
+	oldRev := crr.ResourceVersion
+	defer func() {
+		if crr.ResourceVersion != oldRev {
+			resourceVersionExpectation.Expect(crr)
+		}
+	}()
+	return c.runtimeClient.Status().Patch(context.TODO(), crr, runtimeclient.RawPatch(types.MergePatchType, []byte(body)))
+}
+
+func (c *Controller) sync(key string) (retErr error) {
+	namespace, podName, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		klog.Warningf("Invalid key: %s", key)
+		return nil
+	}
+
+	objectList, err := c.crrInformer.GetIndexer().ByIndex(CRRPodNameIndex, podName)
+	if err != nil {
+		return err
+	}
+
+	crrList := make([]*appsv1alpha1.ContainerRecreateRequest, 0, len(objectList))
+	for _, obj := range objectList {
+		crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
+		if ok && crr != nil && crr.Namespace == namespace {
+			crrList = append(crrList, crr)
+		}
+	}
+	if len(crrList) == 0 {
+		return nil
+	}
+
+	crr, err := c.pickRecreateRequest(crrList) // 挑选一个最早的
+	if err != nil || crr == nil {
+		return err
+	}
+
+	klog.V(3).Infof("Start syncing for %s/%s", namespace, crr.Name)
+	defer func() {
+		if retErr != nil {
+			klog.Errorf("Failed to sync for %s/%s: %v", namespace, crr.Name, retErr)
+		} else {
+			klog.V(3).Infof("Finished syncing for %s/%s", namespace, crr.Name)
+		}
+	}()
+
+	// once first update its phase to recreating
+	if crr.Status.Phase != appsv1alpha1.ContainerRecreateRequestRecreating {
+		return c.updateCRRPhase(crr, appsv1alpha1.ContainerRecreateRequestRecreating)
+	}
+
+	if crr.Spec.Strategy.UnreadyGracePeriodSeconds != nil {
+		unreadyTimeStr := crr.Annotations[appsv1alpha1.ContainerRecreateRequestUnreadyAcquiredKey]
+		if unreadyTimeStr == "" {
+			klog.Infof("CRR %s/%s is waiting for unready acquirement.", crr.Namespace, crr.Name)
+			return nil
+		}
+
+		unreadyTime, err := time.Parse(time.RFC3339, unreadyTimeStr)
+		if err != nil {
+			klog.Errorf("CRR %s/%s failed to parse unready time %s: %v", crr.Namespace, crr.Name, unreadyTimeStr, err)
+			return c.completeCRRStatus(crr, fmt.Sprintf("failed to parse unready time %s: %v", unreadyTimeStr, err))
+		}
+
+		leftTime := time.Duration(*crr.Spec.Strategy.UnreadyGracePeriodSeconds)*time.Second - time.Since(unreadyTime)
+		if leftTime > 0 {
+			klog.Infof("CRR %s/%s is waiting for unready grace period %v left time.", crr.Namespace, crr.Name, leftTime)
+			c.queue.AddAfter(crr.Namespace+"/"+crr.Spec.PodName, leftTime+100*time.Millisecond)
+			return nil
+		}
+	}
+
+	return c.manage(crr)
 }

@@ -2,6 +2,7 @@ package broadcastjob
 
 import (
 	"context"
+	"fmt"
 
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -19,50 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 
 	"github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 )
-
-type podEventHandler struct {
-	enqueueHandler handler.EnqueueRequestForOwner
-}
-
-func isBroadcastJobController(controllerRef *metav1.OwnerReference) bool {
-	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil {
-		klog.Errorf("Could not parse OwnerReference %v APIVersion: %v", controllerRef, err)
-		return false
-	}
-	return controllerRef.Kind == controllerKind.Kind && refGV.Group == controllerKind.Group
-}
-
-func (p *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	pod := evt.Object.(*v1.Pod)
-	if pod.DeletionTimestamp != nil {
-		p.Delete(event.DeleteEvent{Object: evt.Object}, q)
-		return
-	}
-	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && isBroadcastJobController(controllerRef) {
-		key := types.NamespacedName{Namespace: pod.Namespace, Name: controllerRef.Name}.String()
-		scaleExpectations.ObserveScale(key, expectations.Create, getAssignedNode(pod))
-		p.enqueueHandler.Create(evt, q)
-	}
-}
-
-func (p *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	pod := evt.Object.(*v1.Pod)
-	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && isBroadcastJobController(controllerRef) {
-		key := types.NamespacedName{Namespace: pod.Namespace, Name: controllerRef.Name}.String()
-		scaleExpectations.ObserveScale(key, expectations.Delete, getAssignedNode(pod))
-		p.enqueueHandler.Delete(evt, q)
-	}
-}
-
-func (p *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	p.enqueueHandler.Update(evt, q)
-}
-
-func (p *podEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
-}
 
 var _ inject.Mapper = &podEventHandler{}
 
@@ -81,10 +40,13 @@ type enqueueBroadcastJobForNode struct {
 }
 
 func (p *enqueueBroadcastJobForNode) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+	fmt.Println("node create", evt)
 	p.addNode(q, evt.Object)
 }
 
 func (p *enqueueBroadcastJobForNode) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+	fmt.Println("node Delete", evt)
+
 	p.deleteNode(q, evt.Object)
 }
 
@@ -112,6 +74,7 @@ func (p *enqueueBroadcastJobForNode) addNode(q workqueue.RateLimitingInterface, 
 			klog.Infof("Job %s/%s does not fit on node %s due to %v", bcj.Namespace, bcj.Name, node.Name, err)
 			continue
 		}
+		fmt.Println("node addNode", obj)
 
 		// enqueue the bcj for matching node
 		q.Add(reconcile.Request{
@@ -187,4 +150,50 @@ func shouldIgnoreNodeUpdate(oldNode, curNode v1.Node) bool {
 	oldNode.ResourceVersion = curNode.ResourceVersion
 	oldNode.Status.Conditions = curNode.Status.Conditions
 	return apiequality.Semantic.DeepEqual(oldNode, curNode)
+}
+
+type podEventHandler struct {
+	enqueueHandler handler.EnqueueRequestForOwner
+}
+
+func isBroadcastJobController(controllerRef *metav1.OwnerReference) bool {
+	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil {
+		klog.Errorf("Could not parse OwnerReference %v APIVersion: %v", controllerRef, err)
+		return false
+	}
+	return controllerRef.Kind == controllerKind.Kind && refGV.Group == controllerKind.Group
+}
+
+func (p *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+	pod := evt.Object.(*v1.Pod)
+	if pod.DeletionTimestamp != nil {
+		p.Delete(event.DeleteEvent{Object: evt.Object}, q)
+		return
+	}
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && isBroadcastJobController(controllerRef) {
+		key := types.NamespacedName{Namespace: pod.Namespace, Name: controllerRef.Name}.String()
+		scaleExpectations.ObserveScale(key, expectations.Create, getAssignedNode(pod))
+		fmt.Println("pod create", evt)
+
+		p.enqueueHandler.Create(evt, q)
+	}
+}
+
+func (p *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+	pod := evt.Object.(*v1.Pod)
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil && isBroadcastJobController(controllerRef) {
+		key := types.NamespacedName{Namespace: pod.Namespace, Name: controllerRef.Name}.String()
+		scaleExpectations.ObserveScale(key, expectations.Delete, getAssignedNode(pod))
+		fmt.Println("pod delete", evt)
+		p.enqueueHandler.Delete(evt, q)
+	}
+}
+
+func (p *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+	fmt.Println("pod update", evt)
+	p.enqueueHandler.Update(evt, q)
+}
+
+func (p *podEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
 }

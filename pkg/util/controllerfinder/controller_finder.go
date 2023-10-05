@@ -21,7 +21,7 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/util/configuration"
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -136,6 +136,97 @@ func (r *ControllerFinder) GetExpectedScaleForPods(pods []*corev1.Pod) (int32, e
 	return expectedCount, nil
 }
 
+func (r *ControllerFinder) Finders() []PodControllerFinder {
+	return []PodControllerFinder{
+		r.getPodReplicationController,
+		r.getPodDeployment,
+		r.getPodReplicaSet,
+		r.getPodStatefulSet,
+		r.getPodKruiseCloneSet,
+		r.getPodKruiseStatefulSet,
+		r.getPodStatefulSetLike,
+		r.getScaleController,
+	}
+}
+
+var (
+	ControllerKindRS       = apps.SchemeGroupVersion.WithKind("ReplicaSet")
+	ControllerKindSS       = apps.SchemeGroupVersion.WithKind("StatefulSet")
+	ControllerKindRC       = corev1.SchemeGroupVersion.WithKind("ReplicationController")
+	ControllerKindDep      = apps.SchemeGroupVersion.WithKind("Deployment")
+	ControllerKruiseKindCS = appsv1alpha1.SchemeGroupVersion.WithKind("CloneSet")
+	ControllerKruiseKindSS = appsv1beta1.SchemeGroupVersion.WithKind("StatefulSet")
+
+	validWorkloadList = []schema.GroupVersionKind{ControllerKindRS, ControllerKindSS, ControllerKindRC, ControllerKindDep, ControllerKruiseKindCS, ControllerKruiseKindSS}
+)
+
+func (r *ControllerFinder) getScaleController(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
+	if isValidGroupVersionKind(ref.APIVersion, ref.Kind) {
+		return nil, nil
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	gk := schema.GroupKind{
+		Group: gv.Group,
+		Kind:  ref.Kind,
+	}
+
+	mapping, err := r.mapper.RESTMapping(gk, gv.Version)
+	if err != nil {
+		return nil, err
+	}
+	gr := mapping.Resource.GroupResource()
+	scale, err := r.scaleNamespacer.Scales(namespace).Get(context.TODO(), gr, ref.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// TODO, implementsScale
+			return nil, nil
+		}
+		return nil, err
+	}
+	if ref.UID != "" && scale.UID != ref.UID {
+		return nil, nil
+	}
+	selector, err := metav1.ParseToLabelSelector(scale.Status.Selector)
+	if err != nil {
+		return nil, err
+	}
+	return &ScaleAndSelector{
+		Scale: scale.Spec.Replicas,
+		ControllerReference: ControllerReference{
+			APIVersion: ref.APIVersion,
+			Kind:       ref.Kind,
+			Name:       ref.Name,
+			UID:        scale.UID,
+		},
+		Metadata: scale.ObjectMeta,
+		Selector: selector,
+	}, nil
+}
+
+// getPodReplicaSet finds a replicaset which has no matching deployments.
+func (r *ControllerFinder) getReplicaSet(ref ControllerReference, namespace string) (*apps.ReplicaSet, error) {
+	// This error is irreversible, so there is no need to return error
+	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindRS)
+	if !ok {
+		return nil, nil
+	}
+	replicaSet := &apps.ReplicaSet{}
+	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, replicaSet)
+	if err != nil {
+		// when error is NotFound, it is ok here.
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if ref.UID != "" && replicaSet.UID != ref.UID {
+		return nil, nil
+	}
+	return replicaSet, nil
+}
 func (r *ControllerFinder) GetScaleAndSelectorForRef(apiVersion, kind, ns, name string, uid types.UID) (*ScaleAndSelector, error) {
 	targetRef := ControllerReference{
 		APIVersion: apiVersion,
@@ -153,21 +244,67 @@ func (r *ControllerFinder) GetScaleAndSelectorForRef(apiVersion, kind, ns, name 
 	return nil, nil
 }
 
-func (r *ControllerFinder) Finders() []PodControllerFinder {
-	return []PodControllerFinder{r.getPodReplicationController, r.getPodDeployment, r.getPodReplicaSet,
-		r.getPodStatefulSet, r.getPodKruiseCloneSet, r.getPodKruiseStatefulSet, r.getPodStatefulSetLike, r.getScaleController}
+func (r *ControllerFinder) getPodReplicationController(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
+	// This error is irreversible, so there is no need to return error
+	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindRC)
+	if !ok {
+		return nil, nil
+	}
+	rc := &corev1.ReplicationController{}
+	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, rc)
+	if err != nil {
+		// when error is NotFound, it is ok here.
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if ref.UID != "" && rc.UID != ref.UID {
+		return nil, nil
+	}
+	return &ScaleAndSelector{
+		Scale: *(rc.Spec.Replicas),
+		ControllerReference: ControllerReference{
+			APIVersion: rc.APIVersion,
+			Kind:       rc.Kind,
+			Name:       rc.Name,
+			UID:        rc.UID,
+		},
+		Metadata: rc.ObjectMeta,
+	}, nil
 }
 
-var (
-	ControllerKindRS       = apps.SchemeGroupVersion.WithKind("ReplicaSet")
-	ControllerKindSS       = apps.SchemeGroupVersion.WithKind("StatefulSet")
-	ControllerKindRC       = corev1.SchemeGroupVersion.WithKind("ReplicationController")
-	ControllerKindDep      = apps.SchemeGroupVersion.WithKind("Deployment")
-	ControllerKruiseKindCS = appsv1alpha1.SchemeGroupVersion.WithKind("CloneSet")
-	ControllerKruiseKindSS = appsv1beta1.SchemeGroupVersion.WithKind("StatefulSet")
-
-	validWorkloadList = []schema.GroupVersionKind{ControllerKindRS, ControllerKindSS, ControllerKindRC, ControllerKindDep, ControllerKruiseKindCS, ControllerKruiseKindSS}
-)
+// getPodDeployments finds deployments for any replicasets which are being managed by deployments.
+func (r *ControllerFinder) getPodDeployment(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
+	// This error is irreversible, so there is no need to return error
+	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindDep)
+	if !ok {
+		return nil, nil
+	}
+	deployment := &apps.Deployment{}
+	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, deployment)
+	if err != nil {
+		// when error is NotFound, it is ok here.
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if ref.UID != "" && deployment.UID != ref.UID {
+		return nil, nil
+	}
+	return &ScaleAndSelector{
+		Scale:    *(deployment.Spec.Replicas),
+		Selector: deployment.Spec.Selector,
+		ControllerReference: ControllerReference{
+			APIVersion: deployment.APIVersion,
+			Kind:       deployment.Kind,
+			Name:       deployment.Name,
+			UID:        deployment.UID,
+		},
+		Metadata: deployment.ObjectMeta,
+	}, nil
+}
 
 // getPodReplicaSet finds a replicaset which has no matching deployments.
 func (r *ControllerFinder) getPodReplicaSet(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
@@ -207,28 +344,6 @@ func (r *ControllerFinder) getPodReplicaSet(ref ControllerReference, namespace s
 	}, nil
 }
 
-// getPodReplicaSet finds a replicaset which has no matching deployments.
-func (r *ControllerFinder) getReplicaSet(ref ControllerReference, namespace string) (*apps.ReplicaSet, error) {
-	// This error is irreversible, so there is no need to return error
-	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindRS)
-	if !ok {
-		return nil, nil
-	}
-	replicaSet := &apps.ReplicaSet{}
-	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, replicaSet)
-	if err != nil {
-		// when error is NotFound, it is ok here.
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if ref.UID != "" && replicaSet.UID != ref.UID {
-		return nil, nil
-	}
-	return replicaSet, nil
-}
-
 // getPodStatefulSet returns the statefulset referenced by the provided controllerRef.
 func (r *ControllerFinder) getPodStatefulSet(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
 	// This error is irreversible, so there is no need to return error
@@ -259,68 +374,6 @@ func (r *ControllerFinder) getPodStatefulSet(ref ControllerReference, namespace 
 			UID:        statefulSet.UID,
 		},
 		Metadata: statefulSet.ObjectMeta,
-	}, nil
-}
-
-// getPodDeployments finds deployments for any replicasets which are being managed by deployments.
-func (r *ControllerFinder) getPodDeployment(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
-	// This error is irreversible, so there is no need to return error
-	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindDep)
-	if !ok {
-		return nil, nil
-	}
-	deployment := &apps.Deployment{}
-	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, deployment)
-	if err != nil {
-		// when error is NotFound, it is ok here.
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if ref.UID != "" && deployment.UID != ref.UID {
-		return nil, nil
-	}
-	return &ScaleAndSelector{
-		Scale:    *(deployment.Spec.Replicas),
-		Selector: deployment.Spec.Selector,
-		ControllerReference: ControllerReference{
-			APIVersion: deployment.APIVersion,
-			Kind:       deployment.Kind,
-			Name:       deployment.Name,
-			UID:        deployment.UID,
-		},
-		Metadata: deployment.ObjectMeta,
-	}, nil
-}
-
-func (r *ControllerFinder) getPodReplicationController(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
-	// This error is irreversible, so there is no need to return error
-	ok, _ := verifyGroupKind(ref.APIVersion, ref.Kind, ControllerKindRC)
-	if !ok {
-		return nil, nil
-	}
-	rc := &corev1.ReplicationController{}
-	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, rc)
-	if err != nil {
-		// when error is NotFound, it is ok here.
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if ref.UID != "" && rc.UID != ref.UID {
-		return nil, nil
-	}
-	return &ScaleAndSelector{
-		Scale: *(rc.Spec.Replicas),
-		ControllerReference: ControllerReference{
-			APIVersion: rc.APIVersion,
-			Kind:       rc.Kind,
-			Name:       rc.Name,
-			UID:        rc.UID,
-		},
-		Metadata: rc.ObjectMeta,
 	}, nil
 }
 
@@ -444,52 +497,6 @@ func (r *ControllerFinder) getPodStatefulSetLike(ref ControllerReference, namesp
 		scaleSelector.Scale = int32(val)
 	}
 	return scaleSelector, nil
-}
-
-func (r *ControllerFinder) getScaleController(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
-	if isValidGroupVersionKind(ref.APIVersion, ref.Kind) {
-		return nil, nil
-	}
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, err
-	}
-	gk := schema.GroupKind{
-		Group: gv.Group,
-		Kind:  ref.Kind,
-	}
-
-	mapping, err := r.mapper.RESTMapping(gk, gv.Version)
-	if err != nil {
-		return nil, err
-	}
-	gr := mapping.Resource.GroupResource()
-	scale, err := r.scaleNamespacer.Scales(namespace).Get(context.TODO(), gr, ref.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// TODO, implementsScale
-			return nil, nil
-		}
-		return nil, err
-	}
-	if ref.UID != "" && scale.UID != ref.UID {
-		return nil, nil
-	}
-	selector, err := metav1.ParseToLabelSelector(scale.Status.Selector)
-	if err != nil {
-		return nil, err
-	}
-	return &ScaleAndSelector{
-		Scale: scale.Spec.Replicas,
-		ControllerReference: ControllerReference{
-			APIVersion: ref.APIVersion,
-			Kind:       ref.Kind,
-			Name:       ref.Name,
-			UID:        scale.UID,
-		},
-		Metadata: scale.ObjectMeta,
-		Selector: selector,
-	}, nil
 }
 
 func verifyGroupKind(apiVersion, kind string, gvk schema.GroupVersionKind) (bool, error) {

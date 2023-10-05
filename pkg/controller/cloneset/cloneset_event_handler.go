@@ -18,6 +18,7 @@ package cloneset
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -38,7 +39,7 @@ import (
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 )
 
@@ -53,54 +54,6 @@ type podEventHandler struct {
 }
 
 var _ handler.EventHandler = &podEventHandler{}
-
-func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	pod := evt.Object.(*v1.Pod)
-	if pod.DeletionTimestamp != nil {
-		// on a restart of the controller manager, it's possible a new pod shows up in a state that
-		// is already pending deletion. Prevent the pod from being a creation observation.
-		e.Delete(event.DeleteEvent{Object: evt.Object}, q)
-		return
-	}
-
-	// If it has a ControllerRef, that's all that matters.
-	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
-		req := resolveControllerRef(pod.Namespace, controllerRef)
-		if req == nil {
-			return
-		}
-		klog.V(4).Infof("Pod %s/%s created, owner: %s", pod.Namespace, pod.Name, req.Name)
-
-		isSatisfied, _, _ := clonesetutils.ScaleExpectations.SatisfiedExpectations(req.String())
-		clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Create, pod.Name)
-		if isSatisfied {
-			// If the scale expectation is satisfied, it should be an existing Pod and the Informer
-			// cache should have just synced.
-			q.AddAfter(*req, initialingRateLimiter.When(req))
-		} else {
-			// Otherwise, add it immediately and reset the rate limiter
-			initialingRateLimiter.Forget(req)
-			q.Add(*req)
-		}
-		return
-	}
-
-	// Otherwise, it's an orphan. Get a list of all matching CloneSets and sync
-	// them to see if anyone wants to adopt it.
-	// DO NOT observe creation because no controller should be waiting for an
-	// orphan.
-	csList := e.getPodCloneSets(pod)
-	if len(csList) == 0 {
-		return
-	}
-	klog.V(4).Infof("Orphan Pod %s/%s created, matched owner: %s", pod.Namespace, pod.Name, e.joinCloneSetNames(csList))
-	for _, cs := range csList {
-		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{
-			Name:      cs.GetName(),
-			Namespace: cs.GetNamespace(),
-		}})
-	}
-}
 
 func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
 	oldPod := evt.ObjectOld.(*v1.Pod)
@@ -172,15 +125,6 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 	}
 }
 
-func (e *podEventHandler) shouldIgnoreUpdate(req *reconcile.Request, oldPod, curPod *v1.Pod) bool {
-	cs := &appsv1alpha1.CloneSet{}
-	if err := e.Get(context.TODO(), req.NamespacedName, cs); err != nil {
-		return false
-	}
-
-	return clonesetcore.New(cs).IgnorePodUpdateEvent(oldPod, curPod)
-}
-
 func (e *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
 	pod, ok := evt.Object.(*v1.Pod)
 	if !ok {
@@ -205,63 +149,7 @@ func (e *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimiting
 }
 
 func (e *podEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
-
-}
-
-func resolveControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
-	// Parse the Group out of the OwnerReference to compare it to what was parsed out of the requested OwnerType
-	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil {
-		klog.Errorf("Could not parse OwnerReference %v APIVersion: %v", controllerRef, err)
-		return nil
-	}
-
-	// Compare the OwnerReference Group and Kind against the OwnerType Group and Kind specified by the user.
-	// If the two match, create a Request for the objected referred to by
-	// the OwnerReference.  Use the Name from the OwnerReference and the Namespace from the
-	// object in the event.
-	if controllerRef.Kind == clonesetutils.ControllerKind.Kind && refGV.Group == clonesetutils.ControllerKind.Group {
-		// Match found - add a Request for the object referred to in the OwnerReference
-		req := reconcile.Request{NamespacedName: types.NamespacedName{
-			Namespace: namespace,
-			Name:      controllerRef.Name,
-		}}
-		return &req
-	}
-	return nil
-}
-
-func (e *podEventHandler) getPodCloneSets(pod *v1.Pod) []appsv1alpha1.CloneSet {
-	csList := appsv1alpha1.CloneSetList{}
-	if err := e.List(context.TODO(), &csList, client.InNamespace(pod.Namespace)); err != nil {
-		return nil
-	}
-
-	var csMatched []appsv1alpha1.CloneSet
-	for _, cs := range csList.Items {
-		selector, err := metav1.LabelSelectorAsSelector(cs.Spec.Selector)
-		if err != nil || selector.Empty() || !selector.Matches(labels.Set(pod.Labels)) {
-			continue
-		}
-
-		csMatched = append(csMatched, cs)
-	}
-
-	if len(csMatched) > 1 {
-		// ControllerRef will ensure we don't do anything crazy, but more than one
-		// item in this list nevertheless constitutes user error.
-		klog.Warningf("Error! More than one CloneSet is selecting pod %s/%s : %s",
-			pod.Namespace, pod.Name, e.joinCloneSetNames(csMatched))
-	}
-	return csMatched
-}
-
-func (e *podEventHandler) joinCloneSetNames(csList []appsv1alpha1.CloneSet) string {
-	var names []string
-	for _, cs := range csList {
-		names = append(names, cs.Name)
-	}
-	return strings.Join(names, ",")
+	fmt.Println("func (e *podEventHandler) Generic(e")
 }
 
 type pvcEventHandler struct {
@@ -316,5 +204,117 @@ func (e *pvcEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimiting
 }
 
 func (e *pvcEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+	fmt.Println("func (e *pvcEventHandler) Generic(evt")
+}
 
+func (e *podEventHandler) shouldIgnoreUpdate(req *reconcile.Request, oldPod, curPod *v1.Pod) bool {
+	cs := &appsv1alpha1.CloneSet{}
+	if err := e.Get(context.TODO(), req.NamespacedName, cs); err != nil {
+		return false
+	}
+
+	return clonesetcore.New(cs).IgnorePodUpdateEvent(oldPod, curPod)
+}
+
+func resolveControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
+	// Parse the Group out of the OwnerReference to compare it to what was parsed out of the requested OwnerType
+	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil {
+		klog.Errorf("Could not parse OwnerReference %v APIVersion: %v", controllerRef, err)
+		return nil
+	}
+
+	// Compare the OwnerReference Group and Kind against the OwnerType Group and Kind specified by the user.
+	// If the two match, create a Request for the objected referred to by
+	// the OwnerReference.  Use the Name from the OwnerReference and the Namespace from the
+	// object in the event.
+	if controllerRef.Kind == clonesetutils.ControllerKind.Kind && refGV.Group == clonesetutils.ControllerKind.Group {
+		// Match found - add a Request for the object referred to in the OwnerReference
+		req := reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: namespace,
+			Name:      controllerRef.Name,
+		}}
+		return &req
+	}
+	return nil
+}
+func (e *podEventHandler) getPodCloneSets(pod *v1.Pod) []appsv1alpha1.CloneSet {
+	csList := appsv1alpha1.CloneSetList{}
+	if err := e.List(context.TODO(), &csList, client.InNamespace(pod.Namespace)); err != nil {
+		return nil
+	}
+
+	var csMatched []appsv1alpha1.CloneSet
+	for _, cs := range csList.Items {
+		selector, err := metav1.LabelSelectorAsSelector(cs.Spec.Selector)
+		if err != nil || selector.Empty() || !selector.Matches(labels.Set(pod.Labels)) {
+			continue
+		}
+
+		csMatched = append(csMatched, cs)
+	}
+
+	if len(csMatched) > 1 {
+		// ControllerRef will ensure we don't do anything crazy, but more than one
+		// item in this list nevertheless constitutes user error.
+		klog.Warningf("Error! More than one CloneSet is selecting pod %s/%s : %s",
+			pod.Namespace, pod.Name, e.joinCloneSetNames(csMatched))
+	}
+	return csMatched
+}
+func (e *podEventHandler) joinCloneSetNames(csList []appsv1alpha1.CloneSet) string {
+	var names []string
+	for _, cs := range csList {
+		names = append(names, cs.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+	pod := evt.Object.(*v1.Pod)
+	fmt.Println("func (e *podEventHandler) Create(", pod.Namespace, pod.Name)
+	if pod.DeletionTimestamp != nil {
+		// on a restart of the controller manager, it's possible a new pod shows up in a state that
+		// is already pending deletion. Prevent the pod from being a creation observation.
+		e.Delete(event.DeleteEvent{Object: evt.Object}, q)
+		return
+	}
+
+	// If it has a ControllerRef, that's all that matters.
+	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
+		req := resolveControllerRef(pod.Namespace, controllerRef)
+		if req == nil {
+			return
+		}
+		klog.V(4).Infof("Pod %s/%s created, owner: %s", pod.Namespace, pod.Name, req.Name)
+
+		isSatisfied, _, _ := clonesetutils.ScaleExpectations.SatisfiedExpectations(req.String())
+		clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Create, pod.Name)
+		if isSatisfied {
+			// If the scale expectation is satisfied, it should be an existing Pod and the Informer
+			// cache should have just synced.
+			q.AddAfter(*req, initialingRateLimiter.When(req))
+		} else {
+			// Otherwise, add it immediately and reset the rate limiter
+			initialingRateLimiter.Forget(req)
+			q.Add(*req)
+		}
+		return
+	}
+
+	// Otherwise, it's an orphan. Get a list of all matching CloneSets and sync
+	// them to see if anyone wants to adopt it.
+	// DO NOT observe creation because no controller should be waiting for an
+	// orphan.
+	csList := e.getPodCloneSets(pod)
+	if len(csList) == 0 {
+		return
+	}
+	klog.V(4).Infof("Orphan Pod %s/%s created, matched owner: %s", pod.Namespace, pod.Name, e.joinCloneSetNames(csList))
+	for _, cs := range csList {
+		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      cs.GetName(),
+			Namespace: cs.GetNamespace(),
+		}})
+	}
 }

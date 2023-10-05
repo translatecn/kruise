@@ -27,7 +27,7 @@ import (
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"

@@ -1,0 +1,80 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: SidecarSet
+metadata:
+  name: test-sidecarset
+  labels:
+#    apps.kruise.io/sidecarset-custom-version: version-2
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+    matchExpressions:
+  updateStrategy:
+    # NotUpdate 不更新，此模式下只会包含注入能力
+    # RollingUpdate 注入+滚动更新，包含了丰富的滚动更新策略，后面会详细介绍
+    type: RollingUpdate
+#    priorityStrategy:
+#      orderPriority:
+#        - orderedKey: zone
+#      weightPriority:
+#        - weight: 10
+#          matchSelector:
+#            matchLabels:
+#            matchExpressions:
+#    maxUnavailable: 1
+#    partition: 90
+#    paused: true
+#    selector: # 只更新有特定label 的pod
+#      matchLabels:
+#        canary.release: true
+#    scatterStrategy: # 带有这些标签的pod 打散发布(平均插,建议只写一个)，
+#      - key: foo
+#        value: bar
+#  namespace: default
+#  namespaceSelector:
+#    matchLabels:
+#      environment: production
+  # matchExpressions:
+  # - {key: tier, operator: In, values: [frontend, middleware]}
+
+  initContainers:
+  containers:
+    - name: sidecar1
+      image: centos:7
+      command: [ "sleep", "999d" ] # do nothing at all
+      volumeMounts:
+        - name: log-volume
+          mountPath: /var/log
+          # 共享所有卷
+      shareVolumePolicy:
+        type: enabled
+      transferEnv: # 环境变量共享
+        - sourceContainerName: main
+          envName: PROXY_IP    # 要注入的环境变量名
+          envNames:
+            - PROXY_IP2        # 要注入的环境变量名
+            - PROXY_IP3        # 要注入的环境变量名
+        - sourceContainerNameFrom:
+            fieldRef:
+              fieldPath: "metadata.labels['containerName']"
+            # fieldPath: "metadata.annotations['containerName']"
+          envName: TC
+      # extended sidecar container fields  BeforeAppContainer|AfterAppContainer
+      podInjectPolicy: BeforeAppContainer
+  volumes: # this field will be merged into pod.spec.volumes
+    - name: log-volume
+      emptyDir: { }
+#  injectionStrategy:
+#    paused: true
+#    revision:
+#      revisionName: version-2
+  imagePullSecrets:
+    - name: my-secret
+#  patchPodMetadata:
+#    - annotations:
+#        oom-score: '{"log-agent": 1}'
+#        custom.example.com/sidecar-configuration: '{"command": "/home/admin/bin/start.sh", "log-level": "3"}'
+#      patchPolicy: MergePatchJson
+#    - annotations:
+#        apps.kruise.io/container-launch-priority: Ordered
+#      patchPolicy: Overwrite # | Retain

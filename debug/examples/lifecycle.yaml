@@ -1,0 +1,41 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: CloneSet
+metadata:
+  name: demo
+spec:
+  selector:
+    matchLabels:
+      app: CloneSet
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: CloneSet
+        # example.com/unready-blocker-normal: "a"
+    spec:
+      containers:
+      - name: sidecar
+        image: nginx:1.25
+  updateStrategy:
+    type: InPlaceIfPossible
+  lifecycle:
+    preNormal:
+      # inPlaceUpdate:
+      markPodNotReady: true
+      labelsHandler:
+        example.com/unready-blocker-normal: "a"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: default
+spec:
+  selector:
+    app: CloneSet
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP

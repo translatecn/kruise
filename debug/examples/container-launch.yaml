@@ -1,0 +1,61 @@
+#apiVersion: v1
+#kind: Pod
+#metadata:
+#  name: "launch"
+#  labels:
+#    apps.kruise.io/container-launch-priority: Ordered
+#spec:
+#  containers:
+#  - name: main
+#    image: centos:7
+#    command:
+#      - "/bin/sh"
+#      - "-c"
+#      - "sleep 12345"
+#    env:
+#      - name: KRUISE_CONTAINER_LAUNCH_BARRIER
+#        valueFrom:
+#          configMapKeyRef:
+#            name: launch-barrier
+#            key: "c_1"   # its KRUISE_CONTAINER_LAUNCH_PRIORITY is 0
+#  - name: sidecar
+#    image: centos:7
+#    command:
+#      - "/bin/sh"
+#      - "-c"
+#      - "sleep 12345"
+#    env:
+#      - name: KRUISE_CONTAINER_LAUNCH_BARRIER
+#        valueFrom:
+#          configMapKeyRef:
+#            name: launch-barrier
+#            key: "c_1"   # its KRUISE_CONTAINER_LAUNCH_PRIORITY is 1
+#
+## 默认launch-barrier 只有 c_0,等c_0启动好了,在添加c_1
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "launch"
+  annotations:
+    apps.kruise.io/container-launch-priority: Ordered
+spec:
+  containers:
+    - name: main
+      image: centos:7
+      command:
+        - "/bin/sh"
+        - "-c"
+        - "sleep 12345"
+#      env:
+#        - name: KRUISE_CONTAINER_LAUNCH_PRIORITY
+#          value: "1"
+    - name: sidecar
+      image: centos:7
+      command:
+        - "/bin/sh"
+        - "-c"
+        - "sleep 12345"
+#      env:
+#        - name: KRUISE_CONTAINER_LAUNCH_PRIORITY
+#          value: "2"
+# 默认launch-barrier 只有 c_0,等c_0启动好了,在添加c_1

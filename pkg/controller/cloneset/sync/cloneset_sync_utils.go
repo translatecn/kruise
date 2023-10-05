@@ -28,8 +28,8 @@ import (
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/specifieddelete"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
+	specifieddelete "github.com/openkruise/kruise/pkg/util/specifieddelete"
 	v1 "k8s.io/api/core/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
@@ -73,10 +73,11 @@ type expectationDiffs struct {
 	// it indicates the above number of old revision Pods
 	useSurgeOldRevision int
 
-	// updateNum is the diff number that should update
-	// '0' means no need to update
-	// positive number means need to update more Pods to updateRevision
-	// negative number means need to update more Pods to currentRevision (rollback)
+	// updateNum是应该更新的diff数
+	// '0'表示不需要更新
+	//正数意味着需要更新更多的pod到updateRevision
+	//负数意味着需要更新更多的pod到currentRevision (rollback)
+
 	updateNum int
 	// updateMaxUnavailable is the maximum number of ready Pods that can be updating
 	updateMaxUnavailable int

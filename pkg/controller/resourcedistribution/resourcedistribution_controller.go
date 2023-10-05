@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"reflect"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -46,7 +48,6 @@ import (
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	utils "github.com/openkruise/kruise/pkg/webhook/resourcedistribution/validating"
 )
 
@@ -191,6 +192,29 @@ func (r *ReconcileResourceDistribution) Reconcile(_ context.Context, req ctrl.Re
 	}
 
 	return r.doReconcile(distributor)
+}
+
+// updateDistributorStatus update distributor status after reconcile
+func (r *ReconcileResourceDistribution) updateDistributorStatus(distributor *appsv1alpha1.ResourceDistribution, newStatus *appsv1alpha1.ResourceDistributionStatus) error {
+	if reflect.DeepEqual(distributor.Status, *newStatus) {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		object := &appsv1alpha1.ResourceDistribution{}
+		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: distributor.Name}, object); err != nil {
+			return err
+		}
+		object.Status = *newStatus
+		return r.Client.Status().Update(context.TODO(), object)
+	})
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *ReconcileResourceDistribution) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		// Uncomment the following line adding a pointer to an instance of the controlled resource as an argument
+		// For().
+		Complete(r)
 }
 
 // doReconcile distribute and clean resource
@@ -370,27 +394,4 @@ func (r *ReconcileResourceDistribution) handleErrors(errLists ...[]*UnexpectedEr
 		}
 	}
 	return conditions, errList
-}
-
-// updateDistributorStatus update distributor status after reconcile
-func (r *ReconcileResourceDistribution) updateDistributorStatus(distributor *appsv1alpha1.ResourceDistribution, newStatus *appsv1alpha1.ResourceDistributionStatus) error {
-	if reflect.DeepEqual(distributor.Status, *newStatus) {
-		return nil
-	}
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		object := &appsv1alpha1.ResourceDistribution{}
-		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: distributor.Name}, object); err != nil {
-			return err
-		}
-		object.Status = *newStatus
-		return r.Client.Status().Update(context.TODO(), object)
-	})
-}
-
-// SetupWithManager sets up the controller with the Manager.
-func (r *ReconcileResourceDistribution) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		// Uncomment the following line adding a pointer to an instance of the controlled resource as an argument
-		// For().
-		Complete(r)
 }

@@ -82,90 +82,6 @@ func (h *SidecarSetCreateUpdateHandler) validatingSidecarSetFn(ctx context.Conte
 	return true, "allowed to be admitted", nil
 }
 
-func (h *SidecarSetCreateUpdateHandler) validateSidecarSet(obj *appsv1alpha1.SidecarSet, older *appsv1alpha1.SidecarSet) field.ErrorList {
-	// validating ObjectMeta
-	allErrs := genericvalidation.ValidateObjectMeta(&obj.ObjectMeta, false, validateSidecarSetName, field.NewPath("metadata"))
-	// validating spec
-	allErrs = append(allErrs, h.validateSidecarSetSpec(obj, field.NewPath("spec"))...)
-	// when operation is update, older isn't empty, and validating whether old and new containers conflict
-	if older != nil {
-		allErrs = append(allErrs, validateSidecarContainerConflict(obj.Spec.Containers, older.Spec.Containers, field.NewPath("spec.containers"))...)
-	}
-	// iterate across all containers in other sidecarsets to avoid duplication of name
-	sidecarSets := &appsv1alpha1.SidecarSetList{}
-	if err := h.Client.List(context.TODO(), sidecarSets, &client.ListOptions{}); err != nil {
-		allErrs = append(allErrs, field.InternalError(field.NewPath(""), fmt.Errorf("query other sidecarsets failed, err: %v", err)))
-	}
-	allErrs = append(allErrs, validateSidecarConflict(h.Client, sidecarSets, obj, field.NewPath("spec"))...)
-	return allErrs
-}
-
-func validateSidecarSetName(name string, prefix bool) (allErrs []string) {
-	if !validateSidecarSetNameRegex.MatchString(name) {
-		allErrs = append(allErrs, validationutil.RegexError(validateSidecarSetNameMsg, validSidecarSetNameFmt, "example-com"))
-	}
-	if len(name) > sidecarSetNameMaxLen {
-		allErrs = append(allErrs, validationutil.MaxLenError(sidecarSetNameMaxLen))
-	}
-	return allErrs
-}
-
-func (h *SidecarSetCreateUpdateHandler) validateSidecarSetSpec(obj *appsv1alpha1.SidecarSet, fldPath *field.Path) field.ErrorList {
-	spec := &obj.Spec
-	allErrs := field.ErrorList{}
-
-	//validate spec selector
-	if spec.Selector == nil {
-		allErrs = append(allErrs, field.Required(fldPath.Child("selector"), "no selector defined for SidecarSet"))
-	} else {
-		allErrs = append(allErrs, validateSelector(spec.Selector, fldPath.Child("selector"))...)
-	}
-	if spec.Namespace != "" && spec.NamespaceSelector != nil {
-		allErrs = append(allErrs, field.Required(fldPath.Child("namespace, namespaceSelector"), "namespace and namespaceSelector are mutually exclusive"))
-	} else if spec.NamespaceSelector != nil {
-		allErrs = append(allErrs, validateSelector(spec.NamespaceSelector, fldPath.Child("namespaceSelector"))...)
-	}
-	//validating SidecarSetInjectionStrategy
-	allErrs = append(allErrs, h.validateSidecarSetInjectionStrategy(obj, fldPath.Child("injectionStrategy"))...)
-	//validating SidecarSetUpdateStrategy
-	allErrs = append(allErrs, validateSidecarSetUpdateStrategy(&spec.UpdateStrategy, fldPath.Child("updateStrategy"))...)
-	//validating volumes
-	vols, vErrs := getCoreVolumes(spec.Volumes, fldPath.Child("volumes"))
-	allErrs = append(allErrs, vErrs...)
-	//validating sidecar container
-	// if don't have any initContainers, containers
-	if len(spec.InitContainers) == 0 && len(spec.Containers) == 0 {
-		allErrs = append(allErrs, field.Required(fldPath.Root(), "no initContainer or container defined for SidecarSet"))
-	} else {
-		allErrs = append(allErrs, validateContainersForSidecarSet(spec.InitContainers, spec.Containers, vols, fldPath.Root())...)
-	}
-	// validating metadata
-	annotationKeys := sets.NewString()
-	if err := sidecarcontrol.ValidateSidecarSetPatchMetadataWhitelist(h.Client, obj); err != nil {
-		allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), err.Error()))
-	}
-	for _, patch := range spec.PatchPodMetadata {
-		if len(patch.Annotations) == 0 {
-			allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), "no annotations defined for SidecarSet"))
-		} else {
-			metadata := metav1.ObjectMeta{Annotations: patch.Annotations, Name: "fake-name"}
-			allErrs = append(allErrs, genericvalidation.ValidateObjectMeta(&metadata, false, validateSidecarSetName, field.NewPath("patchPodMetadata"))...)
-		}
-		if patch.PatchPolicy == "" {
-			allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), "no patchPolicy defined for patchPodMetadata"))
-		}
-		for k := range patch.Annotations {
-			if annotationKeys.Has(k) {
-				allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), fmt.Sprintf("patch annotation[%s] already exist", k)))
-			} else {
-				annotationKeys.Insert(k)
-			}
-
-		}
-	}
-	return allErrs
-}
-
 func validateSelector(selector *metav1.LabelSelector, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, metavalidation.ValidateLabelSelector(selector, fldPath)...)
@@ -295,6 +211,163 @@ func validateContainersForSidecarSet(
 	return allErrs
 }
 
+func getSidecarsetVolume(volumeName string, sidecarset *appsv1alpha1.SidecarSet) *v1.Volume {
+	for _, volume := range sidecarset.Spec.Volumes {
+		if volume.Name == volumeName {
+			return &volume
+		}
+	}
+	return nil
+}
+
+func validateDownwardAPI(envs []appsv1alpha1.TransferEnvVar, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	for _, tEnv := range envs {
+		if tEnv.SourceContainerNameFrom != nil && tEnv.SourceContainerNameFrom.FieldRef != nil {
+			allErrs = append(allErrs, validateObjectFieldSelector(tEnv.SourceContainerNameFrom.FieldRef, &validDownwardAPIFieldPathExpressions, fldPath.Child("fieldRef"))...)
+		}
+	}
+	return allErrs
+}
+
+func validateObjectFieldSelector(fs *v1.ObjectFieldSelector, expressions *sets.String, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if len(fs.APIVersion) == 0 {
+		allErrs = append(allErrs, field.Required(fldPath.Child("apiVersion"), ""))
+		return allErrs
+	}
+	if len(fs.FieldPath) == 0 {
+		allErrs = append(allErrs, field.Required(fldPath.Child("fieldPath"), ""))
+		return allErrs
+	}
+
+	internalFieldPath, _, err := sidecarcontrol.ConvertDownwardAPIFieldLabel(fs.APIVersion, fs.FieldPath, "")
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("fieldPath"), fs.FieldPath, fmt.Sprintf("error converting fieldPath: %v", err)))
+		return allErrs
+	}
+
+	if path, subscript, ok := fieldpath.SplitMaybeSubscriptedPath(internalFieldPath); ok {
+		switch path {
+		case "metadata.annotations":
+			for _, msg := range validationutil.IsQualifiedName(strings.ToLower(subscript)) {
+				allErrs = append(allErrs, field.Invalid(fldPath, subscript, msg))
+			}
+		case "metadata.labels":
+			for _, msg := range validationutil.IsQualifiedName(subscript) {
+				allErrs = append(allErrs, field.Invalid(fldPath, subscript, msg))
+			}
+		default:
+			allErrs = append(allErrs, field.Invalid(fldPath, path, "does not support subscript"))
+		}
+	} else if !expressions.Has(path) {
+		allErrs = append(allErrs, field.NotSupported(fldPath.Child("fieldPath"), path, expressions.List()))
+		return allErrs
+	}
+
+	return allErrs
+}
+
+var _ admission.Handler = &SidecarSetCreateUpdateHandler{}
+
+// Handle handles admission requests.
+func (h *SidecarSetCreateUpdateHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
+	obj := &appsv1alpha1.SidecarSet{}
+
+	err := h.Decoder.Decode(req, obj)
+	if err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
+	}
+	var oldSidecarSet *appsv1alpha1.SidecarSet
+	//when Operation is update, decode older object
+	if req.AdmissionRequest.Operation == admissionv1.Update {
+		oldSidecarSet = new(appsv1alpha1.SidecarSet)
+		if err := h.Decoder.Decode(
+			admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Object: req.AdmissionRequest.OldObject}},
+			oldSidecarSet); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
+	allowed, reason, err := h.validatingSidecarSetFn(ctx, obj, oldSidecarSet)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	return admission.ValidationResponse(allowed, reason)
+}
+
+var _ inject.Client = &SidecarSetCreateUpdateHandler{}
+
+// InjectClient injects the client into the SidecarSetCreateUpdateHandler
+func (h *SidecarSetCreateUpdateHandler) InjectClient(c client.Client) error {
+	h.Client = c
+	return nil
+}
+
+var _ admission.DecoderInjector = &SidecarSetCreateUpdateHandler{}
+
+// InjectDecoder injects the decoder into the SidecarSetCreateUpdateHandler
+func (h *SidecarSetCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
+	h.Decoder = d
+	return nil
+}
+
+func (h *SidecarSetCreateUpdateHandler) validateSidecarSetSpec(obj *appsv1alpha1.SidecarSet, fldPath *field.Path) field.ErrorList {
+	spec := &obj.Spec
+	allErrs := field.ErrorList{}
+
+	//validate spec selector
+	if spec.Selector == nil {
+		allErrs = append(allErrs, field.Required(fldPath.Child("selector"), "no selector defined for SidecarSet"))
+	} else {
+		allErrs = append(allErrs, validateSelector(spec.Selector, fldPath.Child("selector"))...)
+	}
+	if spec.Namespace != "" && spec.NamespaceSelector != nil {
+		allErrs = append(allErrs, field.Required(fldPath.Child("namespace, namespaceSelector"), "namespace and namespaceSelector are mutually exclusive"))
+	} else if spec.NamespaceSelector != nil {
+		allErrs = append(allErrs, validateSelector(spec.NamespaceSelector, fldPath.Child("namespaceSelector"))...)
+	}
+	//validating SidecarSetInjectionStrategy
+	allErrs = append(allErrs, h.validateSidecarSetInjectionStrategy(obj, fldPath.Child("injectionStrategy"))...)
+	//validating SidecarSetUpdateStrategy
+	allErrs = append(allErrs, validateSidecarSetUpdateStrategy(&spec.UpdateStrategy, fldPath.Child("updateStrategy"))...)
+	//validating volumes
+	vols, vErrs := getCoreVolumes(spec.Volumes, fldPath.Child("volumes"))
+	allErrs = append(allErrs, vErrs...)
+	//validating sidecar container
+	// if don't have any initContainers, containers
+	if len(spec.InitContainers) == 0 && len(spec.Containers) == 0 {
+		allErrs = append(allErrs, field.Required(fldPath.Root(), "no initContainer or container defined for SidecarSet"))
+	} else {
+		allErrs = append(allErrs, validateContainersForSidecarSet(spec.InitContainers, spec.Containers, vols, fldPath.Root())...)
+	}
+	// validating metadata
+	annotationKeys := sets.NewString()
+	if err := sidecarcontrol.ValidateSidecarSetPatchMetadataWhitelist(h.Client, obj); err != nil {
+		allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), err.Error()))
+	}
+	for _, patch := range spec.PatchPodMetadata {
+		if len(patch.Annotations) == 0 {
+			allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), "no annotations defined for SidecarSet"))
+		} else {
+			metadata := metav1.ObjectMeta{Annotations: patch.Annotations, Name: "fake-name"}
+			allErrs = append(allErrs, genericvalidation.ValidateObjectMeta(&metadata, false, validateSidecarSetName, field.NewPath("patchPodMetadata"))...)
+		}
+		if patch.PatchPolicy == "" {
+			allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), "no patchPolicy defined for patchPodMetadata"))
+		}
+		for k := range patch.Annotations {
+			if annotationKeys.Has(k) {
+				allErrs = append(allErrs, field.Required(fldPath.Child("patchPodMetadata"), fmt.Sprintf("patch annotation[%s] already exist", k)))
+			} else {
+				annotationKeys.Insert(k)
+			}
+
+		}
+	}
+	return allErrs
+}
+
 func validateSidecarContainerConflict(newContainers, oldContainers []appsv1alpha1.SidecarContainer, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -407,103 +480,29 @@ func validateSidecarConflict(c client.Client, sidecarSets *appsv1alpha1.SidecarS
 	return allErrs
 }
 
-func getSidecarsetVolume(volumeName string, sidecarset *appsv1alpha1.SidecarSet) *v1.Volume {
-	for _, volume := range sidecarset.Spec.Volumes {
-		if volume.Name == volumeName {
-			return &volume
-		}
+func (h *SidecarSetCreateUpdateHandler) validateSidecarSet(obj *appsv1alpha1.SidecarSet, older *appsv1alpha1.SidecarSet) field.ErrorList {
+	// validating ObjectMeta
+	allErrs := genericvalidation.ValidateObjectMeta(&obj.ObjectMeta, false, validateSidecarSetName, field.NewPath("metadata"))
+	// validating spec
+	allErrs = append(allErrs, h.validateSidecarSetSpec(obj, field.NewPath("spec"))...)
+	// when operation is update, older isn't empty, and validating whether old and new containers conflict
+	if older != nil {
+		allErrs = append(allErrs, validateSidecarContainerConflict(obj.Spec.Containers, older.Spec.Containers, field.NewPath("spec.containers"))...)
 	}
-	return nil
-}
-
-func validateDownwardAPI(envs []appsv1alpha1.TransferEnvVar, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-	for _, tEnv := range envs {
-		if tEnv.SourceContainerNameFrom != nil && tEnv.SourceContainerNameFrom.FieldRef != nil {
-			allErrs = append(allErrs, validateObjectFieldSelector(tEnv.SourceContainerNameFrom.FieldRef, &validDownwardAPIFieldPathExpressions, fldPath.Child("fieldRef"))...)
-		}
+	// iterate across all containers in other sidecarsets to avoid duplication of name
+	sidecarSets := &appsv1alpha1.SidecarSetList{}
+	if err := h.Client.List(context.TODO(), sidecarSets, &client.ListOptions{}); err != nil {
+		allErrs = append(allErrs, field.InternalError(field.NewPath(""), fmt.Errorf("query other sidecarsets failed, err: %v", err)))
 	}
+	allErrs = append(allErrs, validateSidecarConflict(h.Client, sidecarSets, obj, field.NewPath("spec"))...)
 	return allErrs
 }
-
-func validateObjectFieldSelector(fs *v1.ObjectFieldSelector, expressions *sets.String, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	if len(fs.APIVersion) == 0 {
-		allErrs = append(allErrs, field.Required(fldPath.Child("apiVersion"), ""))
-		return allErrs
+func validateSidecarSetName(name string, prefix bool) (allErrs []string) {
+	if !validateSidecarSetNameRegex.MatchString(name) {
+		allErrs = append(allErrs, validationutil.RegexError(validateSidecarSetNameMsg, validSidecarSetNameFmt, "example-com"))
 	}
-	if len(fs.FieldPath) == 0 {
-		allErrs = append(allErrs, field.Required(fldPath.Child("fieldPath"), ""))
-		return allErrs
+	if len(name) > sidecarSetNameMaxLen {
+		allErrs = append(allErrs, validationutil.MaxLenError(sidecarSetNameMaxLen))
 	}
-
-	internalFieldPath, _, err := sidecarcontrol.ConvertDownwardAPIFieldLabel(fs.APIVersion, fs.FieldPath, "")
-	if err != nil {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("fieldPath"), fs.FieldPath, fmt.Sprintf("error converting fieldPath: %v", err)))
-		return allErrs
-	}
-
-	if path, subscript, ok := fieldpath.SplitMaybeSubscriptedPath(internalFieldPath); ok {
-		switch path {
-		case "metadata.annotations":
-			for _, msg := range validationutil.IsQualifiedName(strings.ToLower(subscript)) {
-				allErrs = append(allErrs, field.Invalid(fldPath, subscript, msg))
-			}
-		case "metadata.labels":
-			for _, msg := range validationutil.IsQualifiedName(subscript) {
-				allErrs = append(allErrs, field.Invalid(fldPath, subscript, msg))
-			}
-		default:
-			allErrs = append(allErrs, field.Invalid(fldPath, path, "does not support subscript"))
-		}
-	} else if !expressions.Has(path) {
-		allErrs = append(allErrs, field.NotSupported(fldPath.Child("fieldPath"), path, expressions.List()))
-		return allErrs
-	}
-
 	return allErrs
-}
-
-var _ admission.Handler = &SidecarSetCreateUpdateHandler{}
-
-// Handle handles admission requests.
-func (h *SidecarSetCreateUpdateHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
-	obj := &appsv1alpha1.SidecarSet{}
-
-	err := h.Decoder.Decode(req, obj)
-	if err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
-	}
-	var oldSidecarSet *appsv1alpha1.SidecarSet
-	//when Operation is update, decode older object
-	if req.AdmissionRequest.Operation == admissionv1.Update {
-		oldSidecarSet = new(appsv1alpha1.SidecarSet)
-		if err := h.Decoder.Decode(
-			admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Object: req.AdmissionRequest.OldObject}},
-			oldSidecarSet); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
-	}
-	allowed, reason, err := h.validatingSidecarSetFn(ctx, obj, oldSidecarSet)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.ValidationResponse(allowed, reason)
-}
-
-var _ inject.Client = &SidecarSetCreateUpdateHandler{}
-
-// InjectClient injects the client into the SidecarSetCreateUpdateHandler
-func (h *SidecarSetCreateUpdateHandler) InjectClient(c client.Client) error {
-	h.Client = c
-	return nil
-}
-
-var _ admission.DecoderInjector = &SidecarSetCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the SidecarSetCreateUpdateHandler
-func (h *SidecarSetCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
 }

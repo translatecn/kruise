@@ -27,7 +27,7 @@ import (
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/history"
+	history "github.com/openkruise/kruise/pkg/util/history"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	apps "k8s.io/api/apps/v1"

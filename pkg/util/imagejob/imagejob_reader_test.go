@@ -24,6 +24,8 @@ import (
 	"sync"
 	"testing"
 
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +40,7 @@ import (
 	"github.com/openkruise/kruise/apis"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
+	fieldindex "github.com/openkruise/kruise/pkg/util/fieldindex"
 )
 
 var c client.Client
@@ -49,7 +51,7 @@ func TestMain(m *testing.M) {
 	t := &envtest.Environment{
 		CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 	}
-	apis.AddToScheme(clientgoscheme.Scheme)
+	utilruntime.Must(apis.AddToScheme(clientgoscheme.Scheme))
 
 	var err error
 	if cfg, err = t.Start(); err != nil {

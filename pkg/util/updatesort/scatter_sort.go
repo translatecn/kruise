@@ -28,66 +28,10 @@ type scatterSort struct {
 	strategy appsv1alpha1.UpdateScatterStrategy
 }
 
-func NewScatterSorter(s appsv1alpha1.UpdateScatterStrategy) Sorter {
-	return &scatterSort{strategy: s}
-}
-
-// Sort helps scatter the indexes of pods by ScatterStrategy.
-func (ss *scatterSort) Sort(pods []*v1.Pod, indexes []int) []int {
-	if len(ss.strategy) == 0 || len(indexes) <= 1 {
-		return indexes
-	}
-
-	terms := ss.getScatterTerms(pods, indexes)
-	for _, term := range terms {
-		indexes = ss.scatterPodsByRule(term, pods, indexes)
-	}
-	return indexes
-}
-
-// getScatterTerms returns all scatter terms in current sorting. It will sort all terms by sum of pods matched.
-func (ss *scatterSort) getScatterTerms(pods []*v1.Pod, indexes []int) []appsv1alpha1.UpdateScatterTerm {
-	if len(ss.strategy) == 1 {
-		return ss.strategy
-	}
-
-	var termSlice []appsv1alpha1.UpdateScatterTerm
-	ruleCounter := map[string]int{}
-
-	termID := func(term appsv1alpha1.UpdateScatterTerm) string {
-		return term.Key + ":" + term.Value
-	}
-
-	for _, term := range ss.strategy {
-		for _, idx := range indexes {
-			if val, ok := pods[idx].Labels[term.Key]; ok && val == term.Value {
-				newTerm := appsv1alpha1.UpdateScatterTerm{Key: term.Key, Value: val}
-				id := termID(newTerm)
-				if count, ok := ruleCounter[id]; !ok {
-					termSlice = append(termSlice, newTerm)
-					ruleCounter[id] = 1
-				} else {
-					ruleCounter[id] = count + 1
-				}
-			}
-		}
-	}
-
-	sort.SliceStable(termSlice, func(i, j int) bool {
-		cI := ruleCounter[termID(termSlice[i])]
-		cJ := ruleCounter[termID(termSlice[j])]
-		if cI != cJ {
-			return cI > cJ
-		}
-		return i <= j
-	})
-
-	return termSlice
-}
-
 // scatterPodsByRule scatters pods by given rule term.
 func (ss *scatterSort) scatterPodsByRule(term appsv1alpha1.UpdateScatterTerm, pods []*v1.Pod, indexes []int) (ret []int) {
-
+	// 根据出现的次数，进行排序  降序
+	//  indexes 已经按照某种规则 排序过了
 	// 1. counts the total number of matched and unmatched pods; find matched and unmatched pods in indexes waiting to update
 	var matchedIndexes, unmatchedIndexes []int
 	var totalMatched, totalUnmatched int
@@ -100,7 +44,7 @@ func (ss *scatterSort) scatterPodsByRule(term appsv1alpha1.UpdateScatterTerm, po
 		}
 	}
 
-	if len(matchedIndexes) <= 1 || len(unmatchedIndexes) <= 1 {
+	if len(matchedIndexes) <= 1 || len(unmatchedIndexes) <= 1 { // 只有一个匹配、一个不匹配
 		return indexes
 	}
 
@@ -164,6 +108,63 @@ type scatterGroup struct {
 	unmatchedRemainder int
 }
 
+func NewScatterSorter(s appsv1alpha1.UpdateScatterStrategy) Sorter {
+	return &scatterSort{strategy: s}
+}
+
+// Sort helps scatter the indexes of pods by ScatterStrategy.
+func (ss *scatterSort) Sort(pods []*v1.Pod, indexes []int) []int { //  indexes 已经按照某种规则 排序过了
+	if len(ss.strategy) == 0 || len(indexes) <= 1 {
+		return indexes
+	}
+
+	terms := ss.getScatterTerms(pods, indexes) // 根据出现的次数，进行排序  降序
+	for _, term := range terms {
+		indexes = ss.scatterPodsByRule(term, pods, indexes)
+	}
+	return indexes
+}
+
+// getScatterTerms returns all scatter terms in current sorting. It will sort all terms by sum of pods matched.
+func (ss *scatterSort) getScatterTerms(pods []*v1.Pod, indexes []int) []appsv1alpha1.UpdateScatterTerm {
+
+	if len(ss.strategy) == 1 {
+		return ss.strategy
+	}
+
+	var termSlice []appsv1alpha1.UpdateScatterTerm
+	ruleCounter := map[string]int{}
+
+	termID := func(term appsv1alpha1.UpdateScatterTerm) string {
+		return term.Key + ":" + term.Value
+	}
+	// 主要是统计真正存在 拓扑kv对，以及出现的次数
+	for _, term := range ss.strategy {
+		for _, idx := range indexes {
+			if val, ok := pods[idx].Labels[term.Key]; ok && val == term.Value {
+				newTerm := appsv1alpha1.UpdateScatterTerm{Key: term.Key, Value: val}
+				id := termID(newTerm)
+				if count, ok := ruleCounter[id]; !ok {
+					termSlice = append(termSlice, newTerm)
+					ruleCounter[id] = 1
+				} else {
+					ruleCounter[id] = count + 1
+				}
+			}
+		}
+	}
+
+	sort.SliceStable(termSlice, func(i, j int) bool {
+		cI := ruleCounter[termID(termSlice[i])]
+		cJ := ruleCounter[termID(termSlice[j])]
+		if cI != cJ {
+			return cI > cJ
+		}
+		return i <= j
+	})
+
+	return termSlice
+}
 func newScatterGroup(matched, unmatched int) scatterGroup {
 	sg := scatterGroup{}
 	if matched < unmatched {

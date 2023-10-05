@@ -87,3 +87,11 @@ type CustomWorkload struct {
 	// ReplicasPath is the replicas field path of this type of workload, such as "spec.replicas"
 	ReplicasPath string `json:"replicasPath,omitempty"`
 }
+
+/*
+name: kruise-configuration
+data:
+	WorkloadSpread_Watch_Custom_Workload_WhiteList: WSCustomWorkloadWhiteList{}
+	SidecarSet_PatchPodMetadata_WhiteList: SidecarSetPatchMetadataWhiteList{}
+	PPSWatchCustomWorkloadWhiteList: CustomWorkloadWhiteList{}
+*/

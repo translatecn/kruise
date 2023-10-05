@@ -79,6 +79,7 @@ type RollingUpdateStatefulSetStrategy struct {
 	// It affects the pod scale up speed when the podManagementPolicy is set to be OrderedReady.
 	// Combined with MaxUnavailable, it affects the pod update speed regardless of podManagementPolicy.
 	// Default value is 0, max is 300.
+	// 表示pod在更新后需要多长时间才会被认为准备好。
 	// +optional
 	MinReadySeconds *int32 `json:"minReadySeconds,omitempty"`
 }
@@ -214,6 +215,7 @@ type StatefulSetSpec struct {
 	//   Then controller will delete Pod-1 and create Pod-3 (existing Pods will be [0, 2, 3])
 	// - If you just want to delete Pod-1, you should set spec.reserveOrdinal to [1] and spec.replicas to 2.
 	//   Then controller will delete Pod-1 (existing Pods will be [0, 2])
+	// 预留的pod 号，可以和 replicas 配合实现不同功能
 	ReserveOrdinals []int `json:"reserveOrdinals,omitempty"`
 
 	// Lifecycle defines the lifecycle hooks for Pods pre-delete, in-place update.

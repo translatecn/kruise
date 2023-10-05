@@ -23,12 +23,13 @@ import (
 	"reflect"
 	"sync"
 
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+
 	"github.com/openkruise/kruise/pkg/util"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -43,56 +44,6 @@ type RefManager struct {
 
 	once        sync.Once
 	canAdoptErr error
-}
-
-// New returns a RefManager that exposes
-// methods to manage the controllerRef of pods.
-func New(client client.Client, selector *metav1.LabelSelector, owner metav1.Object, schema *runtime.Scheme) (*RefManager, error) {
-	s, err := util.ValidatedLabelSelectorAsSelector(selector)
-	if err != nil {
-		return nil, err
-	}
-
-	ownerType := reflect.TypeOf(owner)
-	if ownerType.Kind() == reflect.Ptr {
-		ownerType = ownerType.Elem()
-	}
-	return &RefManager{
-		client:    client,
-		selector:  s,
-		owner:     owner,
-		ownerType: ownerType,
-		schema:    schema,
-	}, nil
-}
-
-// ClaimOwnedObjects tries to take ownership of a list of objects for this controller.
-func (mgr *RefManager) ClaimOwnedObjects(objs []metav1.Object, filters ...func(metav1.Object) bool) ([]metav1.Object, error) {
-	match := func(obj metav1.Object) bool {
-		if !mgr.selector.Matches(labels.Set(obj.GetLabels())) {
-			return false
-		}
-
-		for _, filter := range filters {
-			if !filter(obj) {
-				return false
-			}
-		}
-
-		return true
-	}
-
-	var claimObjs []metav1.Object
-	var errlist []error
-	for _, obj := range objs {
-		ok, err := mgr.claimObject(obj, match)
-		if err != nil {
-			errlist = append(errlist, err)
-		} else if ok {
-			claimObjs = append(claimObjs, obj)
-		}
-	}
-	return claimObjs, utilerrors.NewAggregate(errlist)
 }
 
 func (mgr *RefManager) canAdoptOnce() error {
@@ -212,6 +163,56 @@ func (mgr *RefManager) release(obj metav1.Object) error {
 	}
 
 	return nil
+}
+
+// New returns a RefManager that exposes
+// methods to manage the controllerRef of pods.
+func New(client client.Client, selector *metav1.LabelSelector, owner metav1.Object, schema *runtime.Scheme) (*RefManager, error) {
+	s, err := util.ValidatedLabelSelectorAsSelector(selector)
+	if err != nil {
+		return nil, err
+	}
+
+	ownerType := reflect.TypeOf(owner)
+	if ownerType.Kind() == reflect.Ptr {
+		ownerType = ownerType.Elem()
+	}
+	return &RefManager{
+		client:    client,
+		selector:  s,
+		owner:     owner,
+		ownerType: ownerType,
+		schema:    schema,
+	}, nil
+}
+
+// ClaimOwnedObjects tries to take ownership of a list of objects for this controller.
+func (mgr *RefManager) ClaimOwnedObjects(objs []metav1.Object, filters ...func(metav1.Object) bool) ([]metav1.Object, error) {
+	match := func(obj metav1.Object) bool {
+		if !mgr.selector.Matches(labels.Set(obj.GetLabels())) {
+			return false
+		}
+
+		for _, filter := range filters {
+			if !filter(obj) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	var claimObjs []metav1.Object
+	var errlist []error
+	for _, obj := range objs {
+		ok, err := mgr.claimObject(obj, match)
+		if err != nil {
+			errlist = append(errlist, err)
+		} else if ok {
+			claimObjs = append(claimObjs, obj)
+		}
+	}
+	return claimObjs, utilerrors.NewAggregate(errlist)
 }
 
 func (mgr *RefManager) claimObject(obj metav1.Object, match func(metav1.Object) bool) (bool, error) {

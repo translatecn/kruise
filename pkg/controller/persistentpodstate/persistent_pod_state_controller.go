@@ -23,7 +23,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/openkruise/kruise/pkg/util/configuration"
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
 
 	ctrlUtil "github.com/openkruise/kruise/pkg/controller/util"
 
@@ -31,9 +33,8 @@ import (
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
-	"github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
+	discovery "github.com/openkruise/kruise/pkg/util/discovery"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"

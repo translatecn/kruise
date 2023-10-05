@@ -55,96 +55,6 @@ type Controller struct {
 	statusUpdater         *statusUpdater
 }
 
-// NewController returns the controller for image pulling
-func NewController(opts daemonoptions.Options, secretManager daemonutil.SecretManager) (*Controller, error) {
-	genericClient := client.GetGenericClientWithName("kruise-daemon-imagepuller")
-	informer := newNodeImageInformer(genericClient.KruiseClient, opts.NodeName)
-
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: genericClient.KubeClient.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(opts.Scheme, v1.EventSource{Component: "kruise-daemon-imagepuller", Host: opts.NodeName})
-
-	queue := workqueue.NewNamedRateLimitingQueue(
-		// Backoff duration from 500ms to 50~55s
-		// For nodeimage controller will mark a image:tag task failed (not responded for a long time) if daemon does not report status in 60s.
-		workqueue.NewItemExponentialFailureRateLimiter(500*time.Millisecond, 50*time.Second+time.Millisecond*time.Duration(rand.Intn(5000))),
-		"imagepuller",
-	)
-
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			nodeImage, ok := obj.(*appsv1alpha1.NodeImage)
-			if ok {
-				enqueue(queue, nodeImage)
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			oldNodeImage, oldOK := oldObj.(*appsv1alpha1.NodeImage)
-			newNodeImage, newOK := newObj.(*appsv1alpha1.NodeImage)
-			if !oldOK || !newOK {
-				return
-			}
-			if reflect.DeepEqual(oldNodeImage.Spec, newNodeImage.Spec) {
-				klog.V(5).Infof("Find imagePullNode %s spec has not changed, skip enqueueing.", newNodeImage.Name)
-				return
-			}
-			logNewImages(oldNodeImage, newNodeImage)
-			enqueue(queue, newNodeImage)
-		},
-	})
-
-	puller, err := newRealPuller(opts.RuntimeFactory.GetImageService(), secretManager, recorder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to new puller: %v", err)
-	}
-
-	opts.Healthz.RegisterFunc("nodeImageInformerSynced", func(_ *http.Request) error {
-		if !informer.HasSynced() {
-			return fmt.Errorf("not synced")
-		}
-		return nil
-	})
-
-	return &Controller{
-		scheme:                opts.Scheme,
-		queue:                 queue,
-		puller:                puller,
-		imagePullNodeInformer: informer,
-		imagePullNodeLister:   listersalpha1.NewNodeImageLister(informer.GetIndexer()),
-		statusUpdater:         newStatusUpdater(genericClient.KruiseClient.AppsV1alpha1().NodeImages()),
-	}, nil
-}
-
-func newNodeImageInformer(client kruiseclient.Interface, nodeName string) cache.SharedIndexInformer {
-	tweakListOptionsFunc := func(opt *metav1.ListOptions) {
-		opt.FieldSelector = "metadata.name=" + nodeName
-	}
-
-	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
-			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				tweakListOptionsFunc(&options)
-				return client.AppsV1alpha1().NodeImages().List(context.TODO(), options)
-			},
-			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				tweakListOptionsFunc(&options)
-				return client.AppsV1alpha1().NodeImages().Watch(context.TODO(), options)
-			},
-		},
-		&appsv1alpha1.NodeImage{},
-		0, // do not resync
-		cache.Indexers{},
-	)
-}
-
-func enqueue(queue workqueue.Interface, obj *appsv1alpha1.NodeImage) {
-	if obj.DeletionTimestamp != nil {
-		return
-	}
-	key, _ := cache.MetaNamespaceKeyFunc(obj)
-	queue.Add(key)
-}
-
 func (c *Controller) Run(stop <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
@@ -164,30 +74,6 @@ func (c *Controller) Run(stop <-chan struct{}) {
 
 	klog.Info("Started puller controller successfully")
 	<-stop
-}
-
-// processNextWorkItem will read a single work item off the workqueue and
-// attempt to process it, by calling the syncHandler.
-func (c *Controller) processNextWorkItem() bool {
-	// pull the next work item from queue.  It should be a key we use to lookup
-	// something in a cache
-	key, quit := c.queue.Get()
-	if quit {
-		return false
-	}
-	defer c.queue.Done(key)
-
-	err := c.sync(key.(string))
-
-	if err == nil {
-		// No error, tell the queue to stop tracking history
-		c.queue.Forget(key)
-	} else {
-		// requeue the item to work on later
-		c.queue.AddRateLimited(key)
-	}
-
-	return true
 }
 
 func (c *Controller) sync(key string) (retErr error) {
@@ -264,4 +150,117 @@ func (c *Controller) sync(key string) (retErr error) {
 		c.queue.AddAfter(key, 20*time.Minute+time.Millisecond*time.Duration(rand.Intn(600000)))
 	}
 	return nil
+}
+func newNodeImageInformer(client kruiseclient.Interface, nodeName string) cache.SharedIndexInformer {
+	tweakListOptionsFunc := func(opt *metav1.ListOptions) {
+		opt.FieldSelector = "metadata.name=" + nodeName
+	}
+
+	return cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				tweakListOptionsFunc(&options)
+				return client.AppsV1alpha1().NodeImages().List(context.TODO(), options)
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				tweakListOptionsFunc(&options)
+				return client.AppsV1alpha1().NodeImages().Watch(context.TODO(), options)
+			},
+		},
+		&appsv1alpha1.NodeImage{},
+		0, // do not resync
+		cache.Indexers{},
+	)
+}
+
+func enqueue(queue workqueue.Interface, obj *appsv1alpha1.NodeImage) {
+	if obj.DeletionTimestamp != nil {
+		return
+	}
+	key, _ := cache.MetaNamespaceKeyFunc(obj)
+	queue.Add(key)
+}
+
+// NewController returns the controller for image pulling
+func NewController(opts daemonoptions.Options, secretManager daemonutil.SecretManager) (*Controller, error) {
+	genericClient := client.GetGenericClientWithName("kruise-daemon-imagepuller")
+	informer := newNodeImageInformer(genericClient.KruiseClient, opts.NodeName)
+
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: genericClient.KubeClient.CoreV1().Events("")})
+	recorder := eventBroadcaster.NewRecorder(opts.Scheme, v1.EventSource{Component: "kruise-daemon-imagepuller", Host: opts.NodeName})
+
+	queue := workqueue.NewNamedRateLimitingQueue(
+		// Backoff duration from 500ms to 50~55s
+		// For nodeimage controller will mark a image:tag task failed (not responded for a long time) if daemon does not report status in 60s.
+		workqueue.NewItemExponentialFailureRateLimiter(500*time.Millisecond, 50*time.Second+time.Millisecond*time.Duration(rand.Intn(5000))),
+		"imagepuller",
+	)
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			nodeImage, ok := obj.(*appsv1alpha1.NodeImage)
+			if ok {
+				enqueue(queue, nodeImage)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldNodeImage, oldOK := oldObj.(*appsv1alpha1.NodeImage)
+			newNodeImage, newOK := newObj.(*appsv1alpha1.NodeImage)
+			if !oldOK || !newOK {
+				return
+			}
+			if reflect.DeepEqual(oldNodeImage.Spec, newNodeImage.Spec) {
+				klog.V(5).Infof("Find imagePullNode %s spec has not changed, skip enqueueing.", newNodeImage.Name)
+				return
+			}
+			logNewImages(oldNodeImage, newNodeImage)
+			enqueue(queue, newNodeImage)
+		},
+	})
+
+	puller, err := newRealPuller(opts.RuntimeFactory.GetImageService(), secretManager, recorder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to new puller: %v", err)
+	}
+
+	opts.Healthz.RegisterFunc("nodeImageInformerSynced", func(_ *http.Request) error {
+		if !informer.HasSynced() {
+			return fmt.Errorf("not synced")
+		}
+		return nil
+	})
+
+	return &Controller{
+		scheme:                opts.Scheme,
+		queue:                 queue,
+		puller:                puller,
+		imagePullNodeInformer: informer,
+		imagePullNodeLister:   listersalpha1.NewNodeImageLister(informer.GetIndexer()),
+		statusUpdater:         newStatusUpdater(genericClient.KruiseClient.AppsV1alpha1().NodeImages()),
+	}, nil
+}
+
+// processNextWorkItem will read a single work item off the workqueue and
+// attempt to process it, by calling the syncHandler.
+func (c *Controller) processNextWorkItem() bool {
+	// pull the next work item from queue.  It should be a key we use to lookup
+	// something in a cache
+	key, quit := c.queue.Get()
+	if quit {
+		return false
+	}
+	defer c.queue.Done(key)
+
+	err := c.sync(key.(string))
+
+	if err == nil {
+		// No error, tell the queue to stop tracking history
+		c.queue.Forget(key)
+	} else {
+		// requeue the item to work on later
+		c.queue.AddRateLimited(key)
+	}
+
+	return true
 }

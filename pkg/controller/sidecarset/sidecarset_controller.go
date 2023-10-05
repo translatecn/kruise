@@ -37,7 +37,7 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
 )
 
 func init() {
@@ -78,8 +78,11 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
 	c, err := controller.New("sidecarset-controller", mgr, controller.Options{
-		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles, CacheSyncTimeout: util.GetControllerCacheSyncTimeout(),
-		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
+		Reconciler:              r,
+		MaxConcurrentReconciles: concurrentReconciles,
+		CacheSyncTimeout:        util.GetControllerCacheSyncTimeout(),
+		RateLimiter:             ratelimiter.DefaultControllerRateLimiter(),
+	})
 	if err != nil {
 		return err
 	}

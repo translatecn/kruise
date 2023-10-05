@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/kruise/pkg/util/expectations"
+	"github.com/openkruise/kruise/pkg/util/fieldindex"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,9 +50,7 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/expectations"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
 )
 
 var (

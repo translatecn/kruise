@@ -43,11 +43,6 @@ const (
 	SidecarSetVersionAltEnvKey = "SIDECARSET_VERSION_ALT"
 )
 
-// GetHotUpgradeContainerName returns format: mesh-1, mesh-2
-func GetHotUpgradeContainerName(name string) (string, string) {
-	return name + hotUpgradeNameSuffix1, name + hotUpgradeNameSuffix2
-}
-
 // GetPodSidecarSetVersionAnnotation is only used in hot upgrade container
 // cName format: mesh-1, mesh-2
 func GetPodSidecarSetVersionAnnotation(cName string) string {
@@ -61,44 +56,6 @@ func GetPodSidecarSetVersionAltAnnotation(cName string) string {
 // IsHotUpgradeContainer indicates whether sidecar container update strategy is HotUpdate
 func IsHotUpgradeContainer(sidecarContainer *appsv1alpha1.SidecarContainer) bool {
 	return sidecarContainer.UpgradeStrategy.UpgradeType == appsv1alpha1.SidecarContainerHotUpgrade
-}
-
-// GetPodHotUpgradeInfoInAnnotations checks which hot upgrade sidecar container is working now
-// format: sidecarset.spec.container[x].name -> pod.spec.container[x].name
-// for example: mesh -> mesh-1, envoy -> envoy-2
-func GetPodHotUpgradeInfoInAnnotations(pod *corev1.Pod) map[string]string {
-	hotUpgradeWorkContainer := make(map[string]string)
-	currentStr, ok := pod.Annotations[SidecarSetWorkingHotUpgradeContainer]
-	if !ok {
-		klog.V(6).Infof("Pod(%s/%s) annotations(%s) Not Found", pod.Namespace, pod.Name, SidecarSetWorkingHotUpgradeContainer)
-		return hotUpgradeWorkContainer
-	}
-	if err := json.Unmarshal([]byte(currentStr), &hotUpgradeWorkContainer); err != nil {
-		klog.Errorf("Parse Pod(%s/%s) annotations(%s) Value(%s) failed: %s", pod.Namespace, pod.Name,
-			SidecarSetWorkingHotUpgradeContainer, currentStr, err.Error())
-		return hotUpgradeWorkContainer
-	}
-	return hotUpgradeWorkContainer
-}
-
-// GetPodHotUpgradeContainers return two hot upgrade sidecar containers
-// workContainer: currently working sidecar container, record in pod annotations[kruise.io/sidecarset-working-hotupgrade-container]
-// otherContainer:
-//  1. empty container
-//  2. when in hot upgrading process, the older sidecar container
-func GetPodHotUpgradeContainers(sidecarName string, pod *corev1.Pod) (workContainer, otherContainer string) {
-	hotUpgradeWorkContainer := GetPodHotUpgradeInfoInAnnotations(pod)
-	name1, name2 := GetHotUpgradeContainerName(sidecarName)
-
-	if hotUpgradeWorkContainer[sidecarName] == name1 {
-		otherContainer = name2
-		workContainer = name1
-	} else {
-		otherContainer = name1
-		workContainer = name2
-	}
-
-	return
 }
 
 // para1: nameToUpgrade, para2: otherContainer
@@ -132,4 +89,47 @@ func findContainerToHotUpgrade(sidecarContainer *appsv1alpha1.SidecarContainer, 
 	// Third, the older sidecar container will be upgraded
 	workContainer, olderContainer := GetPodHotUpgradeContainers(sidecarContainer.Name, pod)
 	return olderContainer, workContainer
+}
+
+// GetPodHotUpgradeContainers return two hot upgrade sidecar containers
+// workContainer: currently working sidecar container, record in pod annotations[kruise.io/sidecarset-working-hotupgrade-container]
+// otherContainer:
+//  1. empty container
+//  2. when in hot upgrading process, the older sidecar container
+func GetPodHotUpgradeContainers(sidecarName string, pod *corev1.Pod) (workContainer, otherContainer string) {
+	hotUpgradeWorkContainer := GetPodHotUpgradeInfoInAnnotations(pod)
+	name1, name2 := GetHotUpgradeContainerName(sidecarName)
+
+	if hotUpgradeWorkContainer[sidecarName] == name1 {
+		otherContainer = name2
+		workContainer = name1
+	} else {
+		otherContainer = name1
+		workContainer = name2
+	}
+
+	return
+}
+
+// GetHotUpgradeContainerName returns format: mesh-1, mesh-2
+func GetHotUpgradeContainerName(name string) (string, string) {
+	return name + hotUpgradeNameSuffix1, name + hotUpgradeNameSuffix2
+}
+
+// GetPodHotUpgradeInfoInAnnotations checks which hot upgrade sidecar container is working now
+// format: sidecarset.spec.container[x].name -> pod.spec.container[x].name
+// for example: mesh -> mesh-1, envoy -> envoy-2
+func GetPodHotUpgradeInfoInAnnotations(pod *corev1.Pod) map[string]string {
+	hotUpgradeWorkContainer := make(map[string]string)
+	currentStr, ok := pod.Annotations[SidecarSetWorkingHotUpgradeContainer]
+	if !ok {
+		klog.V(6).Infof("Pod(%s/%s) annotations(%s) Not Found", pod.Namespace, pod.Name, SidecarSetWorkingHotUpgradeContainer)
+		return hotUpgradeWorkContainer
+	}
+	if err := json.Unmarshal([]byte(currentStr), &hotUpgradeWorkContainer); err != nil {
+		klog.Errorf("Parse Pod(%s/%s) annotations(%s) Value(%s) failed: %s", pod.Namespace, pod.Name,
+			SidecarSetWorkingHotUpgradeContainer, currentStr, err.Error())
+		return hotUpgradeWorkContainer
+	}
+	return hotUpgradeWorkContainer
 }

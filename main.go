@@ -25,6 +25,12 @@ import (
 	"time"
 	_ "time/tzdata" // for AdvancedCronJob Time Zone support
 
+	"github.com/openkruise/kruise/pkg/features"
+	"github.com/openkruise/kruise/pkg/util"
+
+	//"github.com/openkruise/kruise/debug/debug"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
 	"github.com/spf13/pflag"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,8 +48,6 @@ import (
 	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
 	extclient "github.com/openkruise/kruise/pkg/client"
 	"github.com/openkruise/kruise/pkg/controller"
-	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
@@ -54,8 +58,8 @@ import (
 )
 
 const (
-	defaultLeaseDuration              = 15 * time.Second
-	defaultRenewDeadline              = 10 * time.Second
+	defaultLeaseDuration              = 1500 * time.Second
+	defaultRenewDeadline              = 1000 * time.Second
 	defaultRetryPeriod                = 2 * time.Second
 	defaultControllerCacheSyncTimeout = 2 * time.Minute
 )
@@ -69,18 +73,19 @@ var (
 )
 
 func init() {
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = appsv1alpha1.AddToScheme(clientgoscheme.Scheme)
-	_ = appsv1beta1.AddToScheme(clientgoscheme.Scheme)
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1alpha1.AddToScheme(clientgoscheme.Scheme))
+	utilruntime.Must(appsv1beta1.AddToScheme(clientgoscheme.Scheme))
 
-	_ = appsv1alpha1.AddToScheme(scheme)
-	_ = appsv1beta1.AddToScheme(scheme)
-	_ = policyv1alpha1.AddToScheme(scheme)
+	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(appsv1beta1.AddToScheme(scheme))
+	utilruntime.Must(policyv1alpha1.AddToScheme(scheme))
 	scheme.AddUnversionedTypes(metav1.SchemeGroupVersion, &metav1.UpdateOptions{}, &metav1.DeleteOptions{}, &metav1.CreateOptions{})
 	// +kubebuilder:scaffold:scheme
 }
 
 func main() {
+	//debug.Init()
 	var metricsAddr, pprofAddr string
 	var healthProbeAddr string
 	var enableLeaderElection, enablePprof, allowPrivileged bool

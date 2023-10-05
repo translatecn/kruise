@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
+
 	"github.com/pkg/errors"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -59,8 +61,7 @@ import (
 	"github.com/openkruise/kruise/pkg/features"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
 )
 
 type invariantFunc func(set *appsv1beta1.StatefulSet, om *fakeObjectManager) error

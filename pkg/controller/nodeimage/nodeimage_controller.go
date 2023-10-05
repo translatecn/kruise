@@ -32,7 +32,7 @@ import (
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	utilimagejob "github.com/openkruise/kruise/pkg/util/imagejob"
-	"github.com/openkruise/kruise/pkg/util/requeueduration"
+	requeueduration "github.com/openkruise/kruise/pkg/util/requeueduration"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -395,7 +395,7 @@ func (r *ReconcileNodeImage) updateNodeImageStatus(nodeImage *appsv1alpha1.NodeI
 
 			var failed bool
 
-			// image-puller not responded for a 1min
+			// image-puller not responded for a 1min  // 10分钟没有上报
 			if tagStatus == nil || tagStatus.Version != tagSpec.Version {
 				if leftTime := responseTimeout - time.Since(tagSpec.CreatedAt.Time); leftTime > 0 {
 					duration.UpdateWithMsg(leftTime, "[status]image %s wait response timeout (60)s since %v created", fullName, tagSpec.CreatedAt)

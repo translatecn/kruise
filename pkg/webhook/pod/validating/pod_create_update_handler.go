@@ -22,7 +22,7 @@ import (
 
 	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/klog/v2"

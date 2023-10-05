@@ -22,9 +22,10 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 	corev1 "k8s.io/api/core/v1"
 	genericvalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

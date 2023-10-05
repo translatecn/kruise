@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 )
 
 type imagePullJobEventHandler struct {

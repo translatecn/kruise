@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util"
 	utils "github.com/openkruise/kruise/pkg/webhook/resourcedistribution/validating"
@@ -37,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/integer"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -272,6 +273,17 @@ func syncItSlowly(namespaces []string, initialBatchSize int, fn func(namespace s
 	return successes, errList
 }
 
+func isControlledByDistributor(resource metav1.Object, distributor *appsv1alpha1.ResourceDistribution) bool {
+	controller := metav1.GetControllerOf(resource)
+	if controller != nil && distributor != nil &&
+		distributor.APIVersion == controller.APIVersion &&
+		distributor.Kind == controller.Kind &&
+		distributor.Name == controller.Name {
+		return true
+	}
+	return false
+}
+
 // listNamespacesForDistributor returns two slices: one contains all matched namespaces, another contains all unmatched.
 // Firstly, Spec.Targets will parse .AllNamespaces, .IncludedNamespaces, and .NamespaceLabelSelector; Then calculate their
 // union; At last ExcludedNamespaces will act on the union to remove the designated namespaces from it.
@@ -334,15 +346,4 @@ func needToUpdate(old, new *unstructured.Unstructured) bool {
 	oldObject["status"] = nil
 	newObject["status"] = nil
 	return !reflect.DeepEqual(oldObject, newObject)
-}
-
-func isControlledByDistributor(resource metav1.Object, distributor *appsv1alpha1.ResourceDistribution) bool {
-	controller := metav1.GetControllerOf(resource)
-	if controller != nil && distributor != nil &&
-		distributor.APIVersion == controller.APIVersion &&
-		distributor.Kind == controller.Kind &&
-		distributor.Name == controller.Name {
-		return true
-	}
-	return false
 }

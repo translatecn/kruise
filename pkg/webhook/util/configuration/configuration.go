@@ -37,6 +37,26 @@ const (
 	validatingWebhookConfigurationName = "kruise-validating-webhook-configuration"
 )
 
+func getPath(clientConfig *admissionregistrationv1.WebhookClientConfig) (string, error) {
+	if clientConfig.Service != nil {
+		return *clientConfig.Service.Path, nil
+	}
+	if clientConfig.URL != nil {
+		u, err := url.Parse(*clientConfig.URL)
+		if err != nil {
+			return "", err
+		}
+		return u.Path, nil
+	}
+	return "", fmt.Errorf("invalid clientConfig: %+v", clientConfig)
+}
+
+func convertClientConfig(clientConfig *admissionregistrationv1.WebhookClientConfig, host string, port int) {
+	url := fmt.Sprintf("https://%s:%d%s", host, port, *clientConfig.Service.Path)
+	clientConfig.URL = &url
+	clientConfig.Service = nil
+}
+
 func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handler, caBundle []byte) error {
 	mutatingConfig, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), mutatingWebhookConfigurationName, metav1.GetOptions{})
 	if err != nil {
@@ -70,6 +90,7 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 			klog.Warningf("Ignore webhook for %s in configuration", path)
 			continue
 		}
+		// todo 为 nil呢？
 		if wh.ClientConfig.Service != nil {
 			wh.ClientConfig.Service.Namespace = webhookutil.GetNamespace()
 			wh.ClientConfig.Service.Name = webhookutil.GetServiceName()
@@ -121,26 +142,6 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 	}
 
 	return nil
-}
-
-func getPath(clientConfig *admissionregistrationv1.WebhookClientConfig) (string, error) {
-	if clientConfig.Service != nil {
-		return *clientConfig.Service.Path, nil
-	}
-	if clientConfig.URL != nil {
-		u, err := url.Parse(*clientConfig.URL)
-		if err != nil {
-			return "", err
-		}
-		return u.Path, nil
-	}
-	return "", fmt.Errorf("invalid clientConfig: %+v", clientConfig)
-}
-
-func convertClientConfig(clientConfig *admissionregistrationv1.WebhookClientConfig, host string, port int) {
-	url := fmt.Sprintf("https://%s:%d%s", host, port, *clientConfig.Service.Path)
-	clientConfig.URL = &url
-	clientConfig.Service = nil
 }
 
 func parseMutatingTemplate(mutatingConfig *admissionregistrationv1.MutatingWebhookConfiguration) ([]admissionregistrationv1.MutatingWebhook, error) {

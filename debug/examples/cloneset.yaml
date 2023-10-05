@@ -1,0 +1,98 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: CloneSet
+metadata:
+  name: demo
+  annotations:
+    apps.kruise.io/image-predownload-parallelism: "10"
+    apps.kruise.io/image-predownload-min-updated-ready-pods: "3" # 滚动更新成功3个以后,开始拉取镜像
+spec:
+  selector:
+    matchLabels:
+      app: CloneSet
+  replicas: 10
+  template:
+    metadata:
+      labels:
+        app: CloneSet
+        ## this label is useful to judge whether this pod is newly-created.
+        example.com/newly-create: "true"
+        ## corresponding to the spec.lifecycle.inPlaceUpdate.labelsHandler.example.com/unready-blocker-inplace
+        example.com/unready-blocker-inplace: "true"
+        ## corresponding to the spec.lifecycle.preDelete.labelsHandler.example.com/unready-blocker-inplace
+        example.com/unready-blocker-delete: "true"
+      annotations:
+        app-config: "... config v1 ..."
+    spec:
+      containers:
+        - name: sidecar
+          env:
+            - name: KRUISE_CONTAINER_PRIORITY
+              value: "10"
+            - name: APP_CONFIG
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['app-config']
+          image: centos:8
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "sleep 1234"
+  #          volumeMounts:
+  #            - name: data-vol
+  #              mountPath: /usr/share/nginx/html
+  #  volumeClaimTemplates:
+  #    - metadata:
+  #        name: data-vol
+  #      spec:
+  #        accessModes: [ "ReadWriteOnce" ]
+  #        resources:
+  #          requests:
+  #            storage: 20Gi
+  updateStrategy:
+    paused: false
+    type: InPlaceIfPossible
+    partition: 3 # 保留旧版本 Pod 的数量或百分比
+    maxUnavailable: 3 # 数量或百分比
+    maxSurge: 3 # 在更新或指定删除期间可以调度的超出所需副本数的最大数量、百分比
+    inPlaceUpdateStrategy:
+      # 控制器在原地升级的过程中会先把 Pod status 改为 not-ready，然后等一段时间（gracePeriodSeconds），最后再去修改 Pod spec 中的镜像版本。
+      # 这样，就为 endpoints-controller 这些控制器留出了充足的时间来将 Pod 从 endpoints 端点列表中去除。
+      gracePeriodSeconds: 10
+    scatterStrategy:
+      - key: foo
+        value: bar
+    priorityStrategy:
+      orderPriority:
+        - orderedKey: some-label-key
+      weightPriority:
+        - weight: 50
+          matchSelector:
+            matchLabels:
+              test-key: foo
+        - weight: 30
+          matchSelector:
+            matchLabels:
+              test-key: bar
+  scaleStrategy:
+    podsToDelete:
+    maxUnavailable: 2
+    disablePVCReuse: true
+  minReadySeconds: 60
+  revisionHistoryLimit: 10
+  lifecycle:
+    preNormal:
+      markPodNotReady: true # 可以利用这一特性，在容器真正被停止之前将 Pod 上的流量先行排除，防止流量损失。
+      finalizersHandler:
+        - example.io/unready-blocker
+    preDelete:
+      labelsHandler:
+        example.com/unready-blocker-delete: "true"
+      markPodNotReady: true # 可以利用这一特性，在容器真正被停止之前将 Pod 上的流量先行排除，防止流量损失。
+      finalizersHandler:
+        - example.io/unready-blocker
+    inPlaceUpdate:
+      markPodNotReady: true # 可以利用这一特性，在容器真正被停止之前将 Pod 上的流量先行排除，防止流量损失。
+      labelsHandler:
+        example.com/unready-blocker-inplace: "true"
+      finalizersHandler:
+        - example.io/unready-blocker

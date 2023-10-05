@@ -1,0 +1,135 @@
+#name: kruise-controller-manager
+#serviceType: deployment
+#containers:
+#  - name: manager
+#    dev:
+#      image: registry.cn-hangzhou.aliyuncs.com/acejilam/mygo:1.20
+#      shell: bash
+#      workDir: /xxxxx
+#      resources:
+#        limits:
+#          memory: 4Gi
+#          cpu: "4"
+#        requests:
+#          memory: 4Gi
+#          cpu: "4"
+#      command:
+#        run:
+#          - /usr/local/go1.20/bin/go
+#          - run
+#          - .
+#          - --enable-leader-election
+#          - --metrics-addr=:8080
+#          - --health-probe-addr=:8000
+#          - --logtostderr=true
+#          - --leader-election-namespace=kruise-system
+#          - --v=4
+#          - --feature-gates=PreDownloadImageForInPlaceUpdate=true
+#          - --sync-period=0
+#        debug:
+#          - rm
+#          - "-rf"
+#          - manager
+#          - "&&"
+#          - /usr/local/go1.20/bin/go
+#          - build
+#          - -o
+#          - manager
+#          - .
+#          - '&&'
+#          - /usr/local/go1.20/bin/dlv
+#          - --listen=:2345
+#          - --headless=true
+#          - --api-version=2
+#          - --accept-multiclient
+#          - exec
+#          - manager
+#          - --
+#          - --enable-leader-election
+#          - --metrics-addr=:8080
+#          - --health-probe-addr=:8000
+#          - --logtostderr=true
+#          - --leader-election-namespace=kruise-system
+#          - --v=4
+#          - --feature-gates=PreDownloadImageForInPlaceUpdate=true
+#          - --sync-period=0
+#      debug:
+#        remoteDebugPort: 2345
+#        language: go
+#      hotReload: true
+#      sync:
+#        type: send
+#        mode: gitIgnore
+#      env:
+#        - name: GOPROXY
+#          value: https://goproxy.cn/,direct
+#        - name: GO111MODULE
+#          value: "on"
+#      portForward:
+#        - 2345:2345
+
+
+
+name: kruise-daemon
+serviceType: daemonset
+containers:
+  - name: daemon
+    dev:
+      image: registry.cn-hangzhou.aliyuncs.com/acejilam/mygo:1.20
+      shell: bash
+      workDir: /xxxxx
+      resources:
+        limits:
+          memory: 4Gi
+          cpu: "4"
+        requests:
+          memory: 4Gi
+          cpu: "4"
+      command:
+        run:
+          - /usr/local/go1.20/bin/go
+          - run
+          - ./cmd/daemon
+          - --logtostderr=true
+          - --v=4
+          - --addr=:10221
+          - --feature-gates=PreDownloadImageForInPlaceUpdate=true
+          - --socket-file=
+        debug:
+          - /usr/local/go1.20/bin/go
+          - build
+          - -o
+          - daemon
+          - ./cmd/daemon
+          - '&&'
+          - /usr/local/go1.20/bin/dlv
+          - --listen=:2345
+          - --headless=true
+          - --api-version=2
+          - --accept-multiclient
+          - exec
+          - daemon
+          - --
+          - --logtostderr=true
+          - --v=4
+          - --addr=:10221
+          - --feature-gates=PreDownloadImageForInPlaceUpdate=true
+          - --socket-file=
+      debug:
+        remoteDebugPort: 2345
+        language: go
+      hotReload: true
+      sync:
+        type: send
+        mode: gitIgnore
+        deleteProtection: true
+        filePattern: [ ]
+        ignoreFilePattern: [ ]
+      env:
+        - name: GOPROXY
+          value: https://goproxy.cn/,direct
+        - name: GO111MODULE
+          value: "on"
+      portForward:
+        - 2345:2345
+

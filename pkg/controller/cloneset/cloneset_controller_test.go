@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	fieldindex "github.com/openkruise/kruise/pkg/util/fieldindex"
+
 	"github.com/onsi/gomega"
 	"github.com/openkruise/kruise/apis/apps/defaults"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
@@ -31,7 +33,6 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

@@ -55,8 +55,8 @@ import (
 	kruiseappsinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions/apps/v1beta1"
 	kruiseappslisters "github.com/openkruise/kruise/pkg/client/listers/apps/v1beta1"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 const statefulSetResyncPeriod = 30 * time.Second

@@ -20,12 +20,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/openkruise/kruise/pkg/util/configuration"
-
 	"k8s.io/klog/v2"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
 	"github.com/openkruise/kruise/pkg/webhook/pod/mutating"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"

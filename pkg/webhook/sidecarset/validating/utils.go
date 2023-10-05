@@ -29,22 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func getCoreVolumes(volumes []v1.Volume, fldPath *field.Path) ([]core.Volume, field.ErrorList) {
-	allErrs := field.ErrorList{}
-
-	var coreVolumes []core.Volume
-	for _, volume := range volumes {
-		coreVolume := core.Volume{}
-		if err := corev1.Convert_v1_Volume_To_core_Volume(&volume, &coreVolume, nil); err != nil {
-			allErrs = append(allErrs, field.Invalid(fldPath.Root(), volume, fmt.Sprintf("Convert_v1_Volume_To_core_Volume failed: %v", err)))
-			return nil, allErrs
-		}
-		coreVolumes = append(coreVolumes, coreVolume)
-	}
-
-	return coreVolumes, allErrs
-}
-
 func isSidecarSetNamespaceOverlapping(c client.Client, origin *appsv1alpha1.SidecarSet, other *appsv1alpha1.SidecarSet) bool {
 	originNamespace := origin.Spec.Namespace
 	otherNamespace := other.Spec.Namespace
@@ -63,4 +47,20 @@ func isSidecarSetNamespaceOverlapping(c client.Client, origin *appsv1alpha1.Side
 		return false
 	}
 	return true
+}
+
+func getCoreVolumes(volumes []v1.Volume, fldPath *field.Path) ([]core.Volume, field.ErrorList) {
+	allErrs := field.ErrorList{}
+
+	var coreVolumes []core.Volume
+	for _, volume := range volumes {
+		coreVolume := core.Volume{}
+		if err := corev1.Convert_v1_Volume_To_core_Volume(&volume, &coreVolume, nil); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Root(), volume, fmt.Sprintf("Convert_v1_Volume_To_core_Volume failed: %v", err)))
+			return nil, allErrs
+		}
+		coreVolumes = append(coreVolumes, coreVolume)
+	}
+
+	return coreVolumes, allErrs
 }

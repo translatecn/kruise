@@ -72,34 +72,17 @@ func (p *enqueueRequestForPod) handlePodUpdate(q workqueue.RateLimitingInterface
 	}
 }
 
-func isInterestingPod(pod *corev1.Pod) bool {
-	if pod.DeletionTimestamp != nil ||
-		pod.Status.Phase != corev1.PodRunning ||
-		pod.Spec.RestartPolicy == corev1.RestartPolicyAlways {
-		return false
-	}
-
-	if containersCompleted(pod, getSidecar(pod)) {
-		return false
-	}
-
-	switch pod.Spec.RestartPolicy {
-	case corev1.RestartPolicyNever:
-		return containersCompleted(pod, getMain(pod))
-	case corev1.RestartPolicyOnFailure:
-		return containersSucceeded(pod, getMain(pod))
-	}
-	return false
-}
-
-func getMain(pod *corev1.Pod) sets.String {
-	mainNames := sets.NewString()
-	for i := range pod.Spec.Containers {
-		if !isSidecar(pod.Spec.Containers[i]) {
-			mainNames.Insert(pod.Spec.Containers[i].Name)
+func isSidecar(container corev1.Container) bool {
+	for _, env := range container.Env {
+		// KRUISE_TERMINATE_SIDECAR_WHEN_JOB_EXIT=true
+		// KRUISE_TERMINATE_SIDECAR_WHEN_JOB_EXIT_WITH_IMAGE
+		if env.Name == appsv1alpha1.KruiseTerminateSidecarEnv && strings.EqualFold(env.Value, "true") {
+			return true
+		} else if env.Name == appsv1alpha1.KruiseTerminateSidecarWithImageEnv && env.Value != "" {
+			return true
 		}
 	}
-	return mainNames
+	return false
 }
 
 func getSidecar(pod *corev1.Pod) sets.String {
@@ -112,13 +95,33 @@ func getSidecar(pod *corev1.Pod) sets.String {
 	return sidecarNames
 }
 
-func isSidecar(container corev1.Container) bool {
-	for _, env := range container.Env {
-		if env.Name == appsv1alpha1.KruiseTerminateSidecarEnv && strings.EqualFold(env.Value, "true") {
-			return true
-		} else if env.Name == appsv1alpha1.KruiseTerminateSidecarWithImageEnv && env.Value != "" {
-			return true
-		}
+func isInterestingPod(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil ||
+		pod.Status.Phase != corev1.PodRunning ||
+		pod.Spec.RestartPolicy == corev1.RestartPolicyAlways {
+		return false
+	}
+	// 删除 || PodRunning || !RestartPolicyAlways
+
+	if containersCompleted(pod, getSidecar(pod)) {
+		return false
+	}
+
+	switch pod.Spec.RestartPolicy {
+	case corev1.RestartPolicyNever:
+		return containersCompleted(pod, getMain(pod)) // 有退出状态
+	case corev1.RestartPolicyOnFailure:
+		return containersSucceeded(pod, getMain(pod)) // 主容器必须退出码是0
 	}
 	return false
+}
+
+func getMain(pod *corev1.Pod) sets.String {
+	mainNames := sets.NewString()
+	for i := range pod.Spec.Containers {
+		if !isSidecar(pod.Spec.Containers[i]) {
+			mainNames.Insert(pod.Spec.Containers[i].Name)
+		}
+	}
+	return mainNames
 }

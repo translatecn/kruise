@@ -1,0 +1,72 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: WorkloadSpread
+metadata:
+  name: wls
+spec:
+  targetRef:
+    apiVersion: apps/v1 # 它支持apps组中的Deployment和apps.kruise.io组中的CloneSet
+    kind: Deployment
+    name: centos
+  subsets:
+    - name: subset-a
+#      requiredNodeSelectorTerm:
+#        matchExpressions:
+#          - key: topology.kubernetes.io/zone
+#            operator: In
+#            values:
+#              - zone-a
+#      preferredNodeSelectorTerms:
+#        - weight: 1
+#          preference:
+#            matchExpressions:
+#              - key: another-node-label-key
+#                operator: In
+#                values:
+#                  - another-node-label-value
+      maxReplicas: 3
+      tolerations: [ ]
+      patch:
+        metadata:
+          labels:
+            xxx-specific-label: xxx
+#    - name: subset-b
+#      requiredNodeSelectorTerm:
+#        matchExpressions:
+#          - key: topology.kubernetes.io/zone
+#            operator: In
+#            values:
+#              - zone-b
+  scheduleStrategy:
+    type: Adaptive
+    adaptive:
+      disableSimulationSchedule: false
+      rescheduleCriticalSeconds: 30
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: centos
+  labels:
+    app: centos
+spec:
+  replicas: 6
+  template:
+    metadata:
+      name: centos
+      labels:
+        app: centos
+    spec:
+      containers:
+        - name: centos
+          image: centos:7
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "sleep 1d"
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+  selector:
+    matchLabels:
+      app: centos

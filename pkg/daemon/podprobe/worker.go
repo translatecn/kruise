@@ -70,6 +70,15 @@ func newWorker(c *Controller, key probeKey, probe *appsv1alpha1.ContainerProbeSp
 	return w
 }
 
+// stop stops the probe worker. The worker handles cleanup and removes itself from its manager.
+// It is safe to call stop multiple times.
+func (w *worker) stop() {
+	select {
+	case w.stopCh <- struct{}{}:
+	default: // Non-blocking.
+	}
+}
+
 // run periodically probes the container.
 func (w *worker) run() {
 	periodSecond := w.spec.PeriodSeconds
@@ -104,13 +113,18 @@ probeLoop:
 	}
 }
 
-// stop stops the probe worker. The worker handles cleanup and removes itself from its manager.
-// It is safe to call stop multiple times.
-func (w *worker) stop() {
-	select {
-	case w.stopCh <- struct{}{}:
-	default: // Non-blocking.
+func (w *worker) getProbeSpec() *appsv1alpha1.ContainerProbeSpec {
+	return w.spec
+}
+
+func (w *worker) updateProbeSpec(spec *appsv1alpha1.ContainerProbeSpec) {
+	if !reflect.DeepEqual(w.spec.ProbeHandler, spec.ProbeHandler) {
+		if w.containerID != "" {
+			klog.Infof("Pod(%s) container(%s) probe spec changed", w.key.podUID, w.key.containerName)
+			w.probeController.result.set(w.containerID, w.key, w.initialValue, "")
+		}
 	}
+	w.spec = spec
 }
 
 // doProbe probes the container once and records the result.
@@ -119,7 +133,7 @@ func (w *worker) doProbe() (keepGoing bool) {
 	defer func() { recover() }() // Actually eat panics (HandleCrash takes care of logging)
 	defer runtime.HandleCrash(func(_ interface{}) { keepGoing = true })
 
-	container, _ := w.probeController.fetchLatestPodContainer(w.key.podUID, w.key.containerName)
+	container, err := w.probeController.fetchLatestPodContainer(w.key.podUID, w.key.containerName)
 	if container == nil {
 		klog.V(5).Infof("Pod(%s/%s) container(%s) Not Found", w.key.podNs, w.key.podName, w.key.containerName)
 		return true
@@ -180,18 +194,4 @@ func (w *worker) doProbe() (keepGoing bool) {
 	}
 	w.probeController.result.set(w.containerID, w.key, result, msg)
 	return true
-}
-
-func (w *worker) getProbeSpec() *appsv1alpha1.ContainerProbeSpec {
-	return w.spec
-}
-
-func (w *worker) updateProbeSpec(spec *appsv1alpha1.ContainerProbeSpec) {
-	if !reflect.DeepEqual(w.spec.ProbeHandler, spec.ProbeHandler) {
-		if w.containerID != "" {
-			klog.Infof("Pod(%s) container(%s) probe spec changed", w.key.podUID, w.key.containerName)
-			w.probeController.result.set(w.containerID, w.key, w.initialValue, "")
-		}
-	}
-	w.spec = spec
 }

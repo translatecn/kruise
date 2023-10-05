@@ -30,6 +30,70 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func TestSortingActivePods2(t *testing.T) {
+	now := metav1.Now()
+	then := metav1.Time{Time: now.AddDate(0, -1, 0)}
+	zeroTime := metav1.Time{}
+	pod := func(podName, nodeName string, phase v1.PodPhase, ready bool, restarts int32, readySince metav1.Time, created metav1.Time, annotations map[string]string) *v1.Pod {
+		var conditions []v1.PodCondition
+		var containerStatuses []v1.ContainerStatus
+		if ready {
+			conditions = []v1.PodCondition{{Type: v1.PodReady, Status: v1.ConditionTrue, LastTransitionTime: readySince}}
+			containerStatuses = []v1.ContainerStatus{{RestartCount: restarts}}
+		}
+		return &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				CreationTimestamp: created,
+				Name:              podName,
+				Annotations:       annotations,
+			},
+			Spec: v1.PodSpec{NodeName: nodeName},
+			Status: v1.PodStatus{
+				Conditions:        conditions,
+				ContainerStatuses: containerStatuses,
+				Phase:             phase,
+			},
+		}
+	}
+
+	var (
+		unscheduledPod              = pod("unschedule", "node", v1.PodPending, false, 0, zeroTime, zeroTime, nil)
+		scheduledPendingPod         = pod("pending", "node", v1.PodPending, false, 0, zeroTime, zeroTime, nil)
+		unknownPhasePod             = pod("unknown-phase", "node", v1.PodUnknown, false, 0, zeroTime, zeroTime, nil)
+		runningNotReadyPod          = pod("not-ready", "node", v1.PodRunning, false, 0, zeroTime, zeroTime, nil)
+		runningReadyNow             = pod("ready-now", "node", v1.PodRunning, true, 0, now, now, nil)
+		runningReadyThen            = pod("ready-then", "node", v1.PodRunning, true, 0, then, then, nil)
+		runningReadyNowHighRestarts = pod("ready-high-restarts", "node", v1.PodRunning, true, 9001, now, now, nil)
+		runningReadyNowCreatedThen  = pod("ready-now-created-then", "node", v1.PodRunning, true, 0, now, then, nil)
+	)
+	_ = []*v1.Pod{
+		unscheduledPod,
+		scheduledPendingPod,
+		unknownPhasePod,
+		runningNotReadyPod,
+		runningReadyNowCreatedThen,
+		runningReadyNow,
+		runningReadyThen,
+		runningReadyNowHighRestarts,
+		runningReadyNowCreatedThen,
+	}
+	pods := []*v1.Pod{
+		unscheduledPod,
+		runningReadyNowCreatedThen,
+		unknownPhasePod,
+	}
+	sort.Sort(ActivePodsWithRanks{
+		Pods:   pods,
+		Ranker: NewSameNodeRanker(pods),
+		AvailableFunc: func(pod *v1.Pod) bool {
+			return true
+		},
+	})
+	for _, item := range pods {
+		fmt.Println(item.Name)
+	}
+}
+
 func TestSortingActivePods(t *testing.T) {
 	now := metav1.Now()
 	then := metav1.Time{Time: now.AddDate(0, -1, 0)}

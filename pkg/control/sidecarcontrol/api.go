@@ -45,8 +45,10 @@ type SidecarControl interface {
 	// For update pod injection sidecar container scenario, this method can filter out many invalid update events, thus improving the overall webhook performance.
 	IsPodAvailabilityChanged(pod, oldPod *v1.Pod) bool
 
-	//*****upgrade portion*****//
+	// *****升级部分***** //
+
 	// IsPodStateConsistent indicates whether pod.spec and pod.status are consistent after updating the sidecar containers
+	//是否pod.Spec和pod.status 在 sidecar容器后状态保持一致
 	IsPodStateConsistent(pod *v1.Pod, sidecarContainers sets.String) bool
 	// IsPodReady indicates whether pod is fully ready
 	// 1. pod.Status.Phase == v1.PodRunning

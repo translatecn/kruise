@@ -24,6 +24,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
@@ -47,7 +48,6 @@ import (
 	"k8s.io/utils/integer"
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type Processor struct {
@@ -56,219 +56,123 @@ type Processor struct {
 	historyController history.Interface
 }
 
+func filterActiveRevisions(s *appsv1alpha1.SidecarSet, pods []*corev1.Pod, revisions []*apps.ControllerRevision) sets.String {
+	activeRevisions := sets.NewString()
+	for _, pod := range pods {
+		if revision := sidecarcontrol.GetPodSidecarSetControllerRevision(s.Name, pod); revision != "" {
+			activeRevisions.Insert(revision)
+		}
+	}
+
+	if s.Spec.InjectionStrategy.Revision != nil {
+		equalRevisions := make([]*apps.ControllerRevision, 0)
+		if s.Spec.InjectionStrategy.Revision.RevisionName != nil {
+			activeRevisions.Insert(*s.Spec.InjectionStrategy.Revision.RevisionName)
+		}
+
+		if s.Spec.InjectionStrategy.Revision.CustomVersion != nil {
+			for i := range revisions {
+				revision := revisions[i]
+				if revision.Labels[appsv1alpha1.SidecarSetCustomVersionLabel] == *s.Spec.InjectionStrategy.Revision.CustomVersion {
+					equalRevisions = append(equalRevisions, revision)
+				}
+			}
+			if len(equalRevisions) > 0 {
+				history.SortControllerRevisions(equalRevisions)
+				activeRevisions.Insert(equalRevisions[len(equalRevisions)-1].Name)
+			}
+		}
+	}
+
+	return activeRevisions
+}
+
+func isSidecarSetNotUpdate(s *appsv1alpha1.SidecarSet) bool {
+	if s.Spec.UpdateStrategy.Type == appsv1alpha1.NotUpdateSidecarSetStrategyType {
+		klog.V(3).Infof("sidecarSet spreading RollingUpdate config type, name: %s, type: %s", s.Name, s.Spec.UpdateStrategy.Type)
+		return true
+	}
+	return false
+}
+
+func updateContainerInPod(container corev1.Container, pod *corev1.Pod) {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == container.Name {
+			pod.Spec.Containers[i] = container
+			return
+		}
+	}
+}
+
+func updatePodSidecarContainer(control sidecarcontrol.SidecarControl, pod *corev1.Pod) {
+	sidecarSet := control.GetSidecarset()
+
+	// upgrade sidecar containers
+	var changedContainers []string // 同一个sidecar 可能有多个要升级的empty container
+	for _, sidecarContainer := range sidecarSet.Spec.Containers {
+		//sidecarContainer := &sidecarset.Spec.Containers[i]
+		// volumeMounts that injected into sidecar container
+		// when volumeMounts SubPathExpr contains expansions, then need copy container EnvVars(injectEnvs)
+		injectedMounts, injectedEnvs := sidecarcontrol.GetInjectedVolumeMountsAndEnvs(control, &sidecarContainer, pod)
+		// merge VolumeMounts from sidecar.VolumeMounts and shared VolumeMounts
+		sidecarContainer.VolumeMounts = util.MergeVolumeMounts(sidecarContainer.VolumeMounts, injectedMounts)
+
+		// get injected env & mounts explicitly so that can be compared with old ones in pod
+		transferEnvs := sidecarcontrol.GetSidecarTransferEnvs(&sidecarContainer, pod)
+		// append volumeMounts SubPathExpr environments
+		transferEnvs = util.MergeEnvVar(transferEnvs, injectedEnvs)
+		// merged Env from sidecar.Env and transfer envs
+		sidecarContainer.Env = util.MergeEnvVar(sidecarContainer.Env, transferEnvs)
+
+		// upgrade sidecar container to latest
+		newContainer := control.UpgradeSidecarContainer(&sidecarContainer, pod) // 更改 empty 容器的 image
+		// no change, then continue
+		if newContainer == nil {
+			continue
+		}
+		// change, and need to update in pod
+		updateContainerInPod(*newContainer, pod) // 更新pod
+		changedContainers = append(changedContainers, newContainer.Name)
+		// hot upgrade sidecar container
+		if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
+			var olderSidecar string // 正在工作的容器
+			name1, name2 := sidecarcontrol.GetHotUpgradeContainerName(sidecarContainer.Name)
+			if name1 == newContainer.Name {
+				olderSidecar = name2
+			} else {
+				olderSidecar = name1
+			}
+			// hot upgrade annotations
+			// hotUpgradeContainerInfos: sidecarSet.Spec.Container[x].name -> working sidecar container
+			// for example: mesh -> mesh-1, envoy -> envoy-2...
+			hotUpgradeContainerInfos := sidecarcontrol.GetPodHotUpgradeInfoInAnnotations(pod)
+			hotUpgradeContainerInfos[sidecarContainer.Name] = newContainer.Name
+			by, _ := json.Marshal(hotUpgradeContainerInfos)
+			pod.Annotations[sidecarcontrol.SidecarSetWorkingHotUpgradeContainer] = string(by)
+			// update sidecar container resource version in annotations
+			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAnnotation(newContainer.Name)] = sidecarSet.ResourceVersion
+			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAltAnnotation(newContainer.Name)] = pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAnnotation(olderSidecar)]
+			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAltAnnotation(olderSidecar)] = sidecarSet.ResourceVersion
+		}
+	}
+	// update sidecarSet hash in pod annotations[kruise.io/sidecarset-hash]
+	sidecarcontrol.UpdatePodSidecarSetHash(pod, sidecarSet)
+	// update pod information in upgrade
+	// UpdatePodAnnotationsInUpgrade needs to be called when Update Container, including hot-upgrade reset empty image.
+	// However, reset empty image should not update pod sidecarSet hash annotation, so UpdatePodSidecarSetHash needs to be called additionally
+	control.UpdatePodAnnotationsInUpgrade(changedContainers, pod)
+}
+
+func isSidecarSetUpdateFinish(status *appsv1alpha1.SidecarSetStatus) bool {
+	return status.UpdatedPods >= status.MatchedPods
+}
+
 func NewSidecarSetProcessor(cli client.Client, rec record.EventRecorder) *Processor {
 	return &Processor{
 		Client:            cli,
 		recorder:          rec,
 		historyController: historyutil.NewHistory(cli),
 	}
-}
-
-func (p *Processor) UpdateSidecarSet(sidecarSet *appsv1alpha1.SidecarSet) (reconcile.Result, error) {
-	control := sidecarcontrol.New(sidecarSet)
-	// check whether sidecarSet is active
-	if !control.IsActiveSidecarSet() {
-		return reconcile.Result{}, nil
-	}
-	// 1. get matching pods with the sidecarSet
-	pods, err := p.getMatchingPods(sidecarSet)
-	if err != nil {
-		klog.Errorf("sidecarSet get matching pods error, err: %v, name: %s", err, sidecarSet.Name)
-		return reconcile.Result{}, err
-	}
-
-	// register new revision if this sidecarSet is the latest;
-	// return the latest revision that corresponds to this sidecarSet.
-	latestRevision, collisionCount, err := p.registerLatestRevision(sidecarSet, pods)
-	if latestRevision == nil {
-		klog.Errorf("sidecarSet register the latest revision error, err: %v, name: %s", err, sidecarSet.Name)
-		return reconcile.Result{}, err
-	}
-
-	// 2. calculate SidecarSet status based on pod and revision information
-	status := calculateStatus(control, pods, latestRevision, collisionCount)
-	//update sidecarSet status in store
-	if err := p.updateSidecarSetStatus(sidecarSet, status); err != nil {
-		return reconcile.Result{}, err
-	}
-	sidecarSet.Status = *status
-
-	// in case of informer cache latency
-	for _, pod := range pods {
-		sidecarcontrol.UpdateExpectations.ObserveUpdated(sidecarSet.Name, sidecarcontrol.GetSidecarSetRevision(sidecarSet), pod)
-	}
-	allUpdated, _, inflightPods := sidecarcontrol.UpdateExpectations.SatisfiedExpectations(sidecarSet.Name, sidecarcontrol.GetSidecarSetRevision(sidecarSet))
-	if !allUpdated {
-		klog.V(3).Infof("sidecarset %s matched pods has some update in flight: %v, will sync later", sidecarSet.Name, inflightPods)
-		return reconcile.Result{RequeueAfter: time.Second}, nil
-	}
-
-	// 3. If sidecar container hot upgrade complete, then set the other one(empty sidecar container) image to HotUpgradeEmptyImage
-	if isSidecarSetHasHotUpgradeContainer(sidecarSet) {
-		var podsInHotUpgrading []*corev1.Pod
-		for _, pod := range pods {
-			// flip other hot sidecar container to empty, in the following:
-			// 1. the empty sidecar container image isn't equal HotUpgradeEmptyImage
-			// 2. all containers with exception of empty sidecar containers is updated and consistent
-			// 3. all containers with exception of empty sidecar containers is ready
-
-			// don't contain sidecar empty containers
-			sidecarContainers := sidecarcontrol.GetSidecarContainersInPod(sidecarSet)
-			for _, sidecarContainer := range sidecarSet.Spec.Containers {
-				if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
-					_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecarContainer.Name, pod)
-					sidecarContainers.Delete(emptyContainer)
-				}
-			}
-			if isPodSidecarInHotUpgrading(sidecarSet, pod) && control.IsPodStateConsistent(pod, sidecarContainers) &&
-				isHotUpgradingReady(sidecarSet, pod) {
-				podsInHotUpgrading = append(podsInHotUpgrading, pod)
-			}
-		}
-		if err := p.flipHotUpgradingContainers(control, podsInHotUpgrading); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-
-	// 4. SidecarSet upgrade strategy type is NotUpdate
-	if isSidecarSetNotUpdate(sidecarSet) {
-		return reconcile.Result{}, nil
-	}
-
-	// 5. sidecarset already updates all matched pods, then return
-	if isSidecarSetUpdateFinish(status) {
-		klog.V(3).Infof("sidecarSet(%s) matched pods(number=%d) are latest, and don't need update", sidecarSet.Name, len(pods))
-		return reconcile.Result{}, nil
-	}
-
-	// 6. Paused indicates that the SidecarSet is paused to update matched pods
-	if sidecarSet.Spec.UpdateStrategy.Paused {
-		klog.V(3).Infof("sidecarSet is paused, name: %s", sidecarSet.Name)
-		return reconcile.Result{}, nil
-	}
-
-	// 7. upgrade pod sidecar
-	if err := p.updatePods(control, pods); err != nil {
-		return reconcile.Result{}, err
-	}
-	return reconcile.Result{}, nil
-}
-
-func (p *Processor) updatePods(control sidecarcontrol.SidecarControl, pods []*corev1.Pod) error {
-	sidecarset := control.GetSidecarset()
-	// compute next updated pods based on the sidecarset upgrade strategy
-	upgradePods, notUpgradablePods := NewStrategy().GetNextUpgradePods(control, pods)
-	for _, pod := range notUpgradablePods {
-		if err := p.updatePodSidecarSetUpgradableCondition(sidecarset, pod, false); err != nil {
-			klog.Errorf("update NotUpgradable PodCondition error, s:%s, pod:%s, err:%v", sidecarset.Name, pod.Name, err)
-			return err
-		}
-		sidecarcontrol.UpdateExpectations.ExpectUpdated(sidecarset.Name, sidecarcontrol.GetSidecarSetRevision(sidecarset), pod)
-	}
-	if len(notUpgradablePods) > 0 {
-		p.recorder.Eventf(sidecarset, corev1.EventTypeNormal, "NotUpgradablePods", "SidecarSet in-place update detected %d not upgradable pod(s) in this round, will skip them.", len(notUpgradablePods))
-	}
-
-	if len(upgradePods) == 0 {
-		klog.V(3).Infof("sidecarSet next update is nil, skip this round, name: %s", sidecarset.Name)
-		return nil
-	}
-	// mark upgrade pods list
-	podNames := make([]string, 0, len(upgradePods))
-	// upgrade pod sidecar
-	for _, pod := range upgradePods {
-		podNames = append(podNames, pod.Name)
-		if err := p.updatePodSidecarAndHash(control, pod); err != nil {
-			klog.Errorf("updatePodSidecarAndHash error, s:%s, pod:%s, err:%v", sidecarset.Name, pod.Name, err)
-			return err
-		}
-		sidecarcontrol.UpdateExpectations.ExpectUpdated(sidecarset.Name, sidecarcontrol.GetSidecarSetRevision(sidecarset), pod)
-	}
-
-	klog.V(3).Infof("sidecarSet(%s) updated pods(%s)", sidecarset.Name, strings.Join(podNames, ","))
-	return nil
-}
-
-func (p *Processor) updatePodSidecarAndHash(control sidecarcontrol.SidecarControl, pod *corev1.Pod) error {
-	podClone := &corev1.Pod{}
-	sidecarSet := control.GetSidecarset()
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if err := p.Client.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, podClone); err != nil {
-			klog.Errorf("sidecarset(%s) error getting updated pod %s/%s from client", control.GetSidecarset().Name, pod.Namespace, pod.Name)
-		}
-		// update pod sidecar container
-		updatePodSidecarContainer(control, podClone)
-		// older pod don't have SidecarSetListAnnotation
-		// which is to improve the performance of the sidecarSet controller
-		sidecarSetNames, ok := podClone.Annotations[sidecarcontrol.SidecarSetListAnnotation]
-		if !ok || len(sidecarSetNames) == 0 {
-			podClone.Annotations[sidecarcontrol.SidecarSetListAnnotation] = p.listMatchedSidecarSets(podClone)
-		}
-		// patch pod metadata
-		_, err := sidecarcontrol.PatchPodMetadata(&podClone.ObjectMeta, sidecarSet.Spec.PatchPodMetadata)
-		if err != nil {
-			klog.Errorf("sidecarSet(%s) patch pod(%s/%s) metadata failed: %s", sidecarSet.Name, podClone.Namespace, podClone.Name, err.Error())
-			return err
-		}
-		// update pod in store
-		return p.Client.Update(context.TODO(), podClone)
-	})
-
-	if err != nil {
-		return err
-	}
-
-	// update pod condition of sidecar upgradable
-	return p.updatePodSidecarSetUpgradableCondition(sidecarSet, pod, true)
-}
-
-func (p *Processor) listMatchedSidecarSets(pod *corev1.Pod) string {
-	sidecarSetList := &appsv1alpha1.SidecarSetList{}
-	if err := p.Client.List(context.TODO(), sidecarSetList); err != nil {
-		klog.Errorf("List SidecarSets failed: %s", err.Error())
-		return ""
-	}
-
-	//matched SidecarSet.Name list
-	sidecarSetNames := make([]string, 0)
-	for _, sidecarSet := range sidecarSetList.Items {
-		if matched, _ := sidecarcontrol.PodMatchedSidecarSet(p.Client, pod, &sidecarSet); matched {
-			sidecarSetNames = append(sidecarSetNames, sidecarSet.Name)
-		}
-	}
-
-	return strings.Join(sidecarSetNames, ",")
-}
-
-func (p *Processor) updateSidecarSetStatus(sidecarSet *appsv1alpha1.SidecarSet, status *appsv1alpha1.SidecarSetStatus) error {
-	if !inconsistentStatus(sidecarSet, status) {
-		return nil
-	}
-
-	sidecarSetClone := sidecarSet.DeepCopy()
-	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		sidecarSetClone.Status = *status
-		sidecarSetClone.Status.ObservedGeneration = sidecarSetClone.Generation
-
-		updateErr := p.Client.Status().Update(context.TODO(), sidecarSetClone)
-		if updateErr == nil {
-			return nil
-		}
-
-		key := types.NamespacedName{
-			Name: sidecarSetClone.Name,
-		}
-		if err := p.Client.Get(context.TODO(), key, sidecarSetClone); err != nil {
-			klog.Errorf("error getting updated sidecarset %s from client", sidecarSetClone.Name)
-		}
-		return updateErr
-	}); err != nil {
-		return err
-	}
-
-	klog.V(3).Infof("sidecarSet(%s) update status(MatchedPods:%d, UpdatedPods:%d, ReadyPods:%d, UpdatedReadyPods:%d) success",
-		sidecarSet.Name, status.MatchedPods, status.UpdatedPods, status.ReadyPods, status.UpdatedReadyPods)
-	return nil
 }
 
 // If you need update the pod object, you must DeepCopy it
@@ -348,6 +252,7 @@ func (p *Processor) registerLatestRevision(set *appsv1alpha1.SidecarSet, pods []
 	// build a new revision from the current sidecarSet,
 	// the namespace of sidecarset revision must have very strict permissions for average users.
 	// Here use the namespace of kruise-manager.
+	// ToDo 不懂，NextRevision生成了一个最新的，怎么会和已存在的一样呢
 	latestRevision, err = hc.NewRevision(sidecarSet, webhookutil.GetNamespace(), hc.NextRevision(revisions), &collisionCount)
 	if err != nil {
 		return nil, collisionCount, err
@@ -361,7 +266,7 @@ func (p *Processor) registerLatestRevision(set *appsv1alpha1.SidecarSet, pods []
 		// if the equivalent revision is immediately prior the update revision has not changed
 		// in case of no change
 		latestRevision = revisions[revisionCount-1]
-	} else if equalCount > 0 {
+	} else if equalCount > 0 { // 回滚
 		// if the equivalent revision is not immediately prior we will roll back by incrementing the
 		// Revision of the equivalent revision
 		// in case of roll back
@@ -392,6 +297,26 @@ func (p *Processor) registerLatestRevision(set *appsv1alpha1.SidecarSet, pods []
 	}
 
 	return latestRevision, collisionCount, nil
+}
+
+// replaceRevision will remove old from revisions, and add new to the end of revisions.
+// This function keeps the order of revisions.
+func replaceRevision(revisions []*apps.ControllerRevision, oldOne, newOne *apps.ControllerRevision) {
+	revisionCount := len(revisions)
+	if revisionCount == 0 || oldOne == nil {
+		return
+	}
+	// remove old revision from revisions
+	found := revisions[0] == oldOne
+	for i := 0; i < revisionCount-1; i++ {
+		if found {
+			revisions[i] = revisions[i+1]
+		} else if revisions[i+1] == oldOne {
+			found = true
+		}
+	}
+	// add this new revision to the end of revisions
+	revisions[revisionCount-1] = newOne
 }
 
 func (p *Processor) updateCustomVersionLabel(revision *apps.ControllerRevision, customVersion string) error {
@@ -447,57 +372,6 @@ func (p *Processor) truncateHistory(revisions []*apps.ControllerRevision, s *app
 	return nil
 }
 
-func filterActiveRevisions(s *appsv1alpha1.SidecarSet, pods []*corev1.Pod, revisions []*apps.ControllerRevision) sets.String {
-	activeRevisions := sets.NewString()
-	for _, pod := range pods {
-		if revision := sidecarcontrol.GetPodSidecarSetControllerRevision(s.Name, pod); revision != "" {
-			activeRevisions.Insert(revision)
-		}
-	}
-
-	if s.Spec.InjectionStrategy.Revision != nil {
-		equalRevisions := make([]*apps.ControllerRevision, 0)
-		if s.Spec.InjectionStrategy.Revision.RevisionName != nil {
-			activeRevisions.Insert(*s.Spec.InjectionStrategy.Revision.RevisionName)
-		}
-
-		if s.Spec.InjectionStrategy.Revision.CustomVersion != nil {
-			for i := range revisions {
-				revision := revisions[i]
-				if revision.Labels[appsv1alpha1.SidecarSetCustomVersionLabel] == *s.Spec.InjectionStrategy.Revision.CustomVersion {
-					equalRevisions = append(equalRevisions, revision)
-				}
-			}
-			if len(equalRevisions) > 0 {
-				history.SortControllerRevisions(equalRevisions)
-				activeRevisions.Insert(equalRevisions[len(equalRevisions)-1].Name)
-			}
-		}
-	}
-
-	return activeRevisions
-}
-
-// replaceRevision will remove old from revisions, and add new to the end of revisions.
-// This function keeps the order of revisions.
-func replaceRevision(revisions []*apps.ControllerRevision, oldOne, newOne *apps.ControllerRevision) {
-	revisionCount := len(revisions)
-	if revisionCount == 0 || oldOne == nil {
-		return
-	}
-	// remove old revision from revisions
-	found := revisions[0] == oldOne
-	for i := 0; i < revisionCount-1; i++ {
-		if found {
-			revisions[i] = revisions[i+1]
-		} else if revisions[i+1] == oldOne {
-			found = true
-		}
-	}
-	// add this new revision to the end of revisions
-	revisions[revisionCount-1] = newOne
-}
-
 // calculate SidecarSet status
 // MatchedPods: all matched pods number
 // UpdatedPods: updated pods number
@@ -531,81 +405,36 @@ func calculateStatus(control sidecarcontrol.SidecarControl, pods []*corev1.Pod, 
 		CollisionCount:     pointer.Int32Ptr(collisionCount),
 	}
 }
-
-func isSidecarSetNotUpdate(s *appsv1alpha1.SidecarSet) bool {
-	if s.Spec.UpdateStrategy.Type == appsv1alpha1.NotUpdateSidecarSetStrategyType {
-		klog.V(3).Infof("sidecarSet spreading RollingUpdate config type, name: %s, type: %s", s.Name, s.Spec.UpdateStrategy.Type)
-		return true
+func (p *Processor) updateSidecarSetStatus(sidecarSet *appsv1alpha1.SidecarSet, status *appsv1alpha1.SidecarSetStatus) error {
+	if !inconsistentStatus(sidecarSet, status) {
+		// ! 非一致  = 一致
+		return nil
 	}
-	return false
-}
 
-func updateContainerInPod(container corev1.Container, pod *corev1.Pod) {
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == container.Name {
-			pod.Spec.Containers[i] = container
-			return
+	sidecarSetClone := sidecarSet.DeepCopy()
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		sidecarSetClone.Status = *status
+		sidecarSetClone.Status.ObservedGeneration = sidecarSetClone.Generation
+
+		updateErr := p.Client.Status().Update(context.TODO(), sidecarSetClone)
+		if updateErr == nil {
+			return nil
 		}
+
+		key := types.NamespacedName{
+			Name: sidecarSetClone.Name,
+		}
+		if err := p.Client.Get(context.TODO(), key, sidecarSetClone); err != nil {
+			klog.Errorf("error getting updated sidecarset %s from client", sidecarSetClone.Name)
+		}
+		return updateErr
+	}); err != nil {
+		return err
 	}
-}
 
-func updatePodSidecarContainer(control sidecarcontrol.SidecarControl, pod *corev1.Pod) {
-	sidecarSet := control.GetSidecarset()
-
-	// upgrade sidecar containers
-	var changedContainers []string
-	for _, sidecarContainer := range sidecarSet.Spec.Containers {
-		//sidecarContainer := &sidecarset.Spec.Containers[i]
-		// volumeMounts that injected into sidecar container
-		// when volumeMounts SubPathExpr contains expansions, then need copy container EnvVars(injectEnvs)
-		injectedMounts, injectedEnvs := sidecarcontrol.GetInjectedVolumeMountsAndEnvs(control, &sidecarContainer, pod)
-		// merge VolumeMounts from sidecar.VolumeMounts and shared VolumeMounts
-		sidecarContainer.VolumeMounts = util.MergeVolumeMounts(sidecarContainer.VolumeMounts, injectedMounts)
-
-		// get injected env & mounts explicitly so that can be compared with old ones in pod
-		transferEnvs := sidecarcontrol.GetSidecarTransferEnvs(&sidecarContainer, pod)
-		// append volumeMounts SubPathExpr environments
-		transferEnvs = util.MergeEnvVar(transferEnvs, injectedEnvs)
-		// merged Env from sidecar.Env and transfer envs
-		sidecarContainer.Env = util.MergeEnvVar(sidecarContainer.Env, transferEnvs)
-
-		// upgrade sidecar container to latest
-		newContainer := control.UpgradeSidecarContainer(&sidecarContainer, pod)
-		// no change, then continue
-		if newContainer == nil {
-			continue
-		}
-		// change, and need to update in pod
-		updateContainerInPod(*newContainer, pod)
-		changedContainers = append(changedContainers, newContainer.Name)
-		// hot upgrade sidecar container
-		if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
-			var olderSidecar string
-			name1, name2 := sidecarcontrol.GetHotUpgradeContainerName(sidecarContainer.Name)
-			if name1 == newContainer.Name {
-				olderSidecar = name2
-			} else {
-				olderSidecar = name1
-			}
-			// hot upgrade annotations
-			// hotUpgradeContainerInfos: sidecarSet.Spec.Container[x].name -> working sidecar container
-			// for example: mesh -> mesh-1, envoy -> envoy-2...
-			hotUpgradeContainerInfos := sidecarcontrol.GetPodHotUpgradeInfoInAnnotations(pod)
-			hotUpgradeContainerInfos[sidecarContainer.Name] = newContainer.Name
-			by, _ := json.Marshal(hotUpgradeContainerInfos)
-			pod.Annotations[sidecarcontrol.SidecarSetWorkingHotUpgradeContainer] = string(by)
-			// update sidecar container resource version in annotations
-			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAnnotation(newContainer.Name)] = sidecarSet.ResourceVersion
-			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAltAnnotation(newContainer.Name)] = pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAnnotation(olderSidecar)]
-			pod.Annotations[sidecarcontrol.GetPodSidecarSetVersionAltAnnotation(olderSidecar)] = sidecarSet.ResourceVersion
-		}
-	}
-	// update sidecarSet hash in pod annotations[kruise.io/sidecarset-hash]
-	sidecarcontrol.UpdatePodSidecarSetHash(pod, sidecarSet)
-	// update pod information in upgrade
-	// UpdatePodAnnotationsInUpgrade needs to be called when Update Container, including hot-upgrade reset empty image.
-	// However, reset empty image should not update pod sidecarSet hash annotation, so UpdatePodSidecarSetHash needs to be called additionally
-	control.UpdatePodAnnotationsInUpgrade(changedContainers, pod)
+	klog.V(3).Infof("sidecarSet(%s) update status(MatchedPods:%d, UpdatedPods:%d, ReadyPods:%d, UpdatedReadyPods:%d) success",
+		sidecarSet.Name, status.MatchedPods, status.UpdatedPods, status.ReadyPods, status.UpdatedReadyPods)
+	return nil
 }
 
 func inconsistentStatus(sidecarSet *appsv1alpha1.SidecarSet, status *appsv1alpha1.SidecarSetStatus) bool {
@@ -618,8 +447,170 @@ func inconsistentStatus(sidecarSet *appsv1alpha1.SidecarSet, status *appsv1alpha
 		status.CollisionCount != sidecarSet.Status.CollisionCount
 }
 
-func isSidecarSetUpdateFinish(status *appsv1alpha1.SidecarSetStatus) bool {
-	return status.UpdatedPods >= status.MatchedPods
+func (p *Processor) UpdateSidecarSet(sidecarSet *appsv1alpha1.SidecarSet) (reconcile.Result, error) {
+	control := sidecarcontrol.New(sidecarSet)
+	// check whether sidecarSet is active
+	if !control.IsActiveSidecarSet() {
+		return reconcile.Result{}, nil
+	}
+	// 1. get matching pods with the sidecarSet
+	pods, err := p.getMatchingPods(sidecarSet)
+	if err != nil {
+		klog.Errorf("sidecarSet get matching pods error, err: %v, name: %s", err, sidecarSet.Name)
+		return reconcile.Result{}, err
+	}
+
+	// register new revision if this sidecarSet is the latest;
+	// return the latest revision that corresponds to this sidecarSet.
+	latestRevision, collisionCount, err := p.registerLatestRevision(sidecarSet, pods)
+	if latestRevision == nil {
+		klog.Errorf("sidecarSet register the latest revision error, err: %v, name: %s", err, sidecarSet.Name)
+		return reconcile.Result{}, err
+	}
+
+	// 2. calculate SidecarSet status based on pod and revision information
+	status := calculateStatus(control, pods, latestRevision, collisionCount)
+	//update sidecarSet status in store
+	if err := p.updateSidecarSetStatus(sidecarSet, status); err != nil {
+		return reconcile.Result{}, err
+	}
+	sidecarSet.Status = *status
+
+	// in case of informer cache latency 在通知缓存延迟的情况下
+	for _, pod := range pods {
+		sidecarcontrol.UpdateExpectations.ObserveUpdated(sidecarSet.Name, sidecarcontrol.GetSidecarSetRevision(sidecarSet), pod)
+	}
+	allUpdated, _, inflightPods := sidecarcontrol.UpdateExpectations.SatisfiedExpectations(sidecarSet.Name, sidecarcontrol.GetSidecarSetRevision(sidecarSet))
+	if !allUpdated {
+		klog.V(3).Infof("sidecarset %s matched pods has some update in flight: %v, will sync later", sidecarSet.Name, inflightPods)
+		return reconcile.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// 3. If sidecar container hot upgrade complete, then set the other one(empty sidecar container) image to HotUpgradeEmptyImage
+	if isSidecarSetHasHotUpgradeContainer(sidecarSet) { // 有没有热升级 sidecar
+		var podsInHotUpgrading []*corev1.Pod
+		for _, pod := range pods {
+			// flip other hot sidecar container to empty, in the following:
+			// 1. the empty sidecar container image isn't equal HotUpgradeEmptyImage
+			// 2. all containers with exception of empty sidecar containers is updated and consistent
+			// 3. all containers with exception of empty sidecar containers is ready
+
+			// don't contain sidecar empty containers
+			sidecarContainers := sidecarcontrol.GetSidecarContainersInPod(sidecarSet)
+			for _, sidecarContainer := range sidecarSet.Spec.Containers {
+				if sidecarcontrol.IsHotUpgradeContainer(&sidecarContainer) {
+					// worker, other
+
+					_, emptyContainer := sidecarcontrol.GetPodHotUpgradeContainers(sidecarContainer.Name, pod) // 从pod label 中获取empty 镜像
+					sidecarContainers.Delete(emptyContainer)
+				}
+			}
+
+			if isPodSidecarInHotUpgrading(sidecarSet, pod) && // emptyContainer容器不是empty镜像
+				control.IsPodStateConsistent(pod, sidecarContainers) && // pod达到一个稳定状态
+				isHotUpgradingReady(sidecarSet, pod) { // ready 状态
+				// Upgrading 【 ready + 其他操作 】
+				podsInHotUpgrading = append(podsInHotUpgrading, pod)
+			}
+		}
+		// 要翻转的pod:   翻转 两个镜像  只是改了 声明中的flag
+		if err := p.flipHotUpgradingContainers(control, podsInHotUpgrading); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
+	// 4. SidecarSet upgrade strategy type is NotUpdate
+	if isSidecarSetNotUpdate(sidecarSet) {
+		return reconcile.Result{}, nil
+	}
+
+	// 5. sidecarset already updates all matched pods, then return
+	if isSidecarSetUpdateFinish(status) {
+		klog.V(3).Infof("sidecarSet(%s) matched pods(number=%d) are latest, and don't need update", sidecarSet.Name, len(pods))
+		return reconcile.Result{}, nil
+	}
+
+	// 6. Paused indicates that the SidecarSet is paused to update matched pods
+	if sidecarSet.Spec.UpdateStrategy.Paused {
+		klog.V(3).Infof("sidecarSet is paused, name: %s", sidecarSet.Name)
+		return reconcile.Result{}, nil
+	}
+
+	// 7. upgrade pod sidecar
+	if err := p.updatePods(control, pods); err != nil {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{}, nil
+}
+
+func (p *Processor) updatePods(control sidecarcontrol.SidecarControl, pods []*corev1.Pod) error {
+	sidecarset := control.GetSidecarset()
+	// compute next updated pods based on the sidecarset upgrade strategy
+	// upgradePods 会截断
+	// notUpgradablePods 不会截断
+	upgradePods, notUpgradablePods := NewStrategy().GetNextUpgradePods(control, pods)
+	for _, pod := range notUpgradablePods {
+		if err := p.updatePodSidecarSetUpgradableCondition(sidecarset, pod, false); err != nil {
+			klog.Errorf("update NotUpgradable PodCondition error, s:%s, pod:%s, err:%v", sidecarset.Name, pod.Name, err)
+			return err
+		}
+		sidecarcontrol.UpdateExpectations.ExpectUpdated(sidecarset.Name, sidecarcontrol.GetSidecarSetRevision(sidecarset), pod)
+	}
+	if len(notUpgradablePods) > 0 {
+		p.recorder.Eventf(sidecarset, corev1.EventTypeNormal, "NotUpgradablePods", "SidecarSet in-place update detected %d not upgradable pod(s) in this round, will skip them.", len(notUpgradablePods))
+	}
+
+	if len(upgradePods) == 0 {
+		klog.V(3).Infof("sidecarSet next update is nil, skip this round, name: %s", sidecarset.Name)
+		return nil
+	}
+	// mark upgrade pods list
+	podNames := make([]string, 0, len(upgradePods))
+	// upgrade pod sidecar
+	for _, pod := range upgradePods {
+		podNames = append(podNames, pod.Name)
+		if err := p.updatePodSidecarAndHash(control, pod); err != nil {
+			klog.Errorf("updatePodSidecarAndHash error, s:%s, pod:%s, err:%v", sidecarset.Name, pod.Name, err)
+			return err
+		}
+		sidecarcontrol.UpdateExpectations.ExpectUpdated(sidecarset.Name, sidecarcontrol.GetSidecarSetRevision(sidecarset), pod)
+	}
+
+	klog.V(3).Infof("sidecarSet(%s) updated pods(%s)", sidecarset.Name, strings.Join(podNames, ","))
+	return nil
+}
+
+func (p *Processor) updatePodSidecarAndHash(control sidecarcontrol.SidecarControl, pod *corev1.Pod) error {
+	podClone := &corev1.Pod{}
+	sidecarSet := control.GetSidecarset()
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := p.Client.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, podClone); err != nil {
+			klog.Errorf("sidecarset(%s) error getting updated pod %s/%s from client", control.GetSidecarset().Name, pod.Namespace, pod.Name)
+		}
+		// update pod sidecar container
+		updatePodSidecarContainer(control, podClone)
+		// older pod don't have SidecarSetListAnnotation
+		// which is to improve the performance of the sidecarSet controller
+		sidecarSetNames, ok := podClone.Annotations[sidecarcontrol.SidecarSetListAnnotation]
+		if !ok || len(sidecarSetNames) == 0 {
+			podClone.Annotations[sidecarcontrol.SidecarSetListAnnotation] = p.listMatchedSidecarSets(podClone)
+		}
+		// patch pod metadata
+		_, err := sidecarcontrol.PatchPodMetadata(&podClone.ObjectMeta, sidecarSet.Spec.PatchPodMetadata)
+		if err != nil {
+			klog.Errorf("sidecarSet(%s) patch pod(%s/%s) metadata failed: %s", sidecarSet.Name, podClone.Namespace, podClone.Name, err.Error())
+			return err
+		}
+		// update pod in store
+		return p.Client.Update(context.TODO(), podClone)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// update pod condition of sidecar upgradable
+	return p.updatePodSidecarSetUpgradableCondition(sidecarSet, pod, true)
 }
 
 func (p *Processor) updatePodSidecarSetUpgradableCondition(sidecarset *appsv1alpha1.SidecarSet, pod *corev1.Pod, upgradable bool) error {
@@ -674,4 +665,22 @@ func (p *Processor) updatePodSidecarSetUpgradableCondition(sidecarset *appsv1alp
 	}
 	klog.V(3).Infof("sidecarSet(%s) update pod %s/%s condition(%s=%s) success", sidecarset.Name, pod.Namespace, pod.Name, sidecarcontrol.SidecarSetUpgradable, condition.Status)
 	return nil
+}
+
+func (p *Processor) listMatchedSidecarSets(pod *corev1.Pod) string {
+	sidecarSetList := &appsv1alpha1.SidecarSetList{}
+	if err := p.Client.List(context.TODO(), sidecarSetList); err != nil {
+		klog.Errorf("List SidecarSets failed: %s", err.Error())
+		return ""
+	}
+
+	//matched SidecarSet.Name list
+	sidecarSetNames := make([]string, 0)
+	for _, sidecarSet := range sidecarSetList.Items {
+		if matched, _ := sidecarcontrol.PodMatchedSidecarSet(p.Client, pod, &sidecarSet); matched {
+			sidecarSetNames = append(sidecarSetNames, sidecarSet.Name)
+		}
+	}
+
+	return strings.Join(sidecarSetNames, ",")
 }

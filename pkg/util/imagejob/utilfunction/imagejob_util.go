@@ -74,6 +74,8 @@ func CreateJobForWorkload(c client.Client, owner metav1.Object, gvk schema.Group
 	return c.Create(context.TODO(), job)
 }
 
+// -------------
+
 func DeleteJobsForWorkload(c client.Client, ownerObj metav1.Object) error {
 	jobList := &appsv1alpha1.ImagePullJobList{}
 	if err := c.List(context.TODO(), jobList, client.InNamespace(ownerObj.GetNamespace())); err != nil {

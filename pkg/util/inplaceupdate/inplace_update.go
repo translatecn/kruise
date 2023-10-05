@@ -23,10 +23,11 @@ import (
 	"strings"
 	"time"
 
+	podadapter "github.com/openkruise/kruise/pkg/util/podadapter"
+
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/podadapter"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -104,61 +105,6 @@ func NewForTypedClient(c clientset.Interface, revisionAdapter revisionadapter.In
 
 func NewForInformer(informer coreinformers.PodInformer, revisionAdapter revisionadapter.Interface) Interface {
 	return &realControl{podAdapter: &podadapter.AdapterInformer{PodInformer: informer}, revisionAdapter: revisionAdapter}
-}
-
-func (c *realControl) Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult {
-	opts = SetOptionsDefaults(opts)
-
-	// check if it is in grace period
-	if gracePeriod, _ := appspub.GetInPlaceUpdateGrace(pod); gracePeriod != "" {
-		delayDuration, err := c.finishGracePeriod(pod, opts)
-		if err != nil {
-			return RefreshResult{RefreshErr: err}
-		}
-		return RefreshResult{DelayDuration: delayDuration}
-	}
-
-	if stateStr, ok := appspub.GetInPlaceUpdateState(pod); ok {
-		state := appspub.InPlaceUpdateState{}
-		if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
-			return RefreshResult{RefreshErr: err}
-		}
-
-		// check in-place updating has not completed yet
-		if checkErr := opts.CheckContainersUpdateCompleted(pod, &state); checkErr != nil {
-			klog.V(6).Infof("Check Pod %s/%s in-place update not completed yet: %v", pod.Namespace, pod.Name, checkErr)
-			return RefreshResult{}
-		}
-
-		// check if there are containers with lower-priority that have to in-place update in next batch
-		if len(state.NextContainerImages) > 0 || len(state.NextContainerRefMetadata) > 0 {
-
-			// pre-check the previous updated containers
-			if checkErr := doPreCheckBeforeNext(pod, state.PreCheckBeforeNext); checkErr != nil {
-				klog.V(5).Infof("Pod %s/%s in-place update pre-check not passed: %v", pod.Namespace, pod.Name, checkErr)
-				return RefreshResult{}
-			}
-
-			// do update the next containers
-			if updated, err := c.updateNextBatch(pod, opts); err != nil {
-				return RefreshResult{RefreshErr: err}
-			} else if updated {
-				return RefreshResult{}
-			}
-		}
-	}
-
-	if !containsReadinessGate(pod) {
-		return RefreshResult{}
-	}
-
-	newCondition := v1.PodCondition{
-		Type:               appspub.InPlaceUpdateReady,
-		Status:             v1.ConditionTrue,
-		LastTransitionTime: metav1.NewTime(Clock.Now()),
-	}
-	err := c.updateCondition(pod, newCondition)
-	return RefreshResult{RefreshErr: err}
 }
 
 func (c *realControl) updateCondition(pod *v1.Pod, condition v1.PodCondition) error {
@@ -264,11 +210,6 @@ func (c *realControl) updateNextBatch(pod *v1.Pod, opts *UpdateOptions) (bool, e
 		return err
 	})
 	return updated, err
-}
-
-func (c *realControl) CanUpdateInPlace(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) bool {
-	opts = SetOptionsDefaults(opts)
-	return opts.CalculateSpec(oldRevision, newRevision, opts) != nil
 }
 
 func (c *realControl) Update(pod *v1.Pod, oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) UpdateResult {
@@ -418,4 +359,63 @@ func hasEqualCondition(pod *v1.Pod, newCondition *v1.PodCondition) bool {
 	isEqual := oldCondition != nil && oldCondition.Status == newCondition.Status &&
 		oldCondition.Reason == newCondition.Reason && oldCondition.Message == newCondition.Message
 	return isEqual
+}
+
+func (c *realControl) Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult {
+	opts = SetOptionsDefaults(opts)
+
+	// check if it is in grace period
+	if gracePeriod, _ := appspub.GetInPlaceUpdateGrace(pod); gracePeriod != "" {
+		delayDuration, err := c.finishGracePeriod(pod, opts)
+		if err != nil {
+			return RefreshResult{RefreshErr: err}
+		}
+		return RefreshResult{DelayDuration: delayDuration}
+	}
+
+	if stateStr, ok := appspub.GetInPlaceUpdateState(pod); ok {
+		state := appspub.InPlaceUpdateState{}
+		if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
+			return RefreshResult{RefreshErr: err}
+		}
+
+		// check in-place updating has not completed yet
+		if checkErr := opts.CheckContainersUpdateCompleted(pod, &state); checkErr != nil {
+			klog.V(6).Infof("Check Pod %s/%s in-place update not completed yet: %v", pod.Namespace, pod.Name, checkErr)
+			return RefreshResult{}
+		}
+
+		// check if there are containers with lower-priority that have to in-place update in next batch
+		if len(state.NextContainerImages) > 0 || len(state.NextContainerRefMetadata) > 0 {
+
+			// pre-check the previous updated containers
+			if checkErr := doPreCheckBeforeNext(pod, state.PreCheckBeforeNext); checkErr != nil {
+				klog.V(5).Infof("Pod %s/%s in-place update pre-check not passed: %v", pod.Namespace, pod.Name, checkErr)
+				return RefreshResult{}
+			}
+
+			// do update the next containers
+			if updated, err := c.updateNextBatch(pod, opts); err != nil {
+				return RefreshResult{RefreshErr: err}
+			} else if updated {
+				return RefreshResult{}
+			}
+		}
+	}
+
+	if !containsReadinessGate(pod) {
+		return RefreshResult{}
+	}
+
+	newCondition := v1.PodCondition{
+		Type:               appspub.InPlaceUpdateReady,
+		Status:             v1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(Clock.Now()),
+	}
+	err := c.updateCondition(pod, newCondition)
+	return RefreshResult{RefreshErr: err}
+}
+func (c *realControl) CanUpdateInPlace(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) bool {
+	opts = SetOptionsDefaults(opts)
+	return opts.CalculateSpec(oldRevision, newRevision, opts) != nil
 }

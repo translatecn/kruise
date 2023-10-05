@@ -69,6 +69,9 @@ type RollingUpdateStatefulSetStrategy struct {
 	// UnorderedUpdate contains strategies for non-ordered update.
 	// If it is not nil, pods will be updated with non-ordered sequence.
 	// Noted that UnorderedUpdate can only be allowed to work with Parallel podManagementPolicy
+	// unordereduupdate包含非有序更新策略。如果它不是nil, pod将使用无序序列更新。请注意，unordereduupdate只能被允许与Parallel podManagementPolicy一起工作
+	// 以上翻译结果来自有道神经网络翻译（YNMT）· 通用场景
+	// 无序时，设置的优先级
 	// +optional
 	UnorderedUpdate *UnorderedUpdateStrategy `json:"unorderedUpdate,omitempty"`
 	// InPlaceUpdateStrategy contains strategies for in-place update.

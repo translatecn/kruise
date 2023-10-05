@@ -75,68 +75,6 @@ func (p *enqueueRequestForNodePodProbe) queue(q workqueue.RateLimitingInterface,
 	})
 }
 
-var _ handler.EventHandler = &enqueueRequestForPod{}
-
-type enqueueRequestForPod struct {
-	reader client.Reader
-}
-
-func (p *enqueueRequestForPod) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {}
-
-func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	obj, ok := evt.Object.(*corev1.Pod)
-	if !ok {
-		return
-	}
-	// remove pod probe from nodePodProbe.spec
-	if obj.Spec.NodeName == "" {
-		return
-	}
-	npp := &appsalphav1.NodePodProbe{}
-	if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: obj.Spec.NodeName}, npp); err != nil {
-		if !errors.IsNotFound(err) {
-			klog.Errorf("Get NodePodProbe(%s) failed: %s", obj.Spec.NodeName)
-		}
-		return
-	}
-	for _, probe := range npp.Spec.PodProbes {
-		if probe.Namespace == obj.Namespace && probe.Name == obj.Name {
-			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: obj.Spec.NodeName}})
-			break
-		}
-	}
-}
-
-func (p *enqueueRequestForPod) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
-}
-
-func (p *enqueueRequestForPod) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	new, ok := evt.ObjectNew.(*corev1.Pod)
-	if !ok {
-		return
-	}
-	old, ok := evt.ObjectOld.(*corev1.Pod)
-	if !ok {
-		return
-	}
-	// remove pod probe from nodePodProbe.spec
-	if new.Spec.NodeName != "" && kubecontroller.IsPodActive(old) && !kubecontroller.IsPodActive(new) {
-		npp := &appsalphav1.NodePodProbe{}
-		if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: new.Spec.NodeName}, npp); err != nil {
-			if !errors.IsNotFound(err) {
-				klog.Errorf("Get NodePodProbe(%s) failed: %s", new.Spec.NodeName)
-			}
-			return
-		}
-		for _, probe := range npp.Spec.PodProbes {
-			if probe.Namespace == new.Namespace && probe.Name == new.Name {
-				q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: new.Spec.NodeName}})
-				break
-			}
-		}
-	}
-}
-
 const (
 	VirtualKubelet = "virtual-kubelet"
 )
@@ -214,4 +152,65 @@ func isNodeReady(node *corev1.Node) bool {
 		return false
 	}
 	return true
+}
+
+var _ handler.EventHandler = &enqueueRequestForPod{}
+
+type enqueueRequestForPod struct {
+	reader client.Reader
+}
+
+func (p *enqueueRequestForPod) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {}
+
+func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+	obj, ok := evt.Object.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	// remove pod probe from nodePodProbe.spec
+	if obj.Spec.NodeName == "" {
+		return
+	}
+	npp := &appsalphav1.NodePodProbe{}
+	if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: obj.Spec.NodeName}, npp); err != nil {
+		if !errors.IsNotFound(err) {
+			klog.Errorf("Get NodePodProbe(%s) failed: %s", obj.Spec.NodeName)
+		}
+		return
+	}
+	for _, probe := range npp.Spec.PodProbes {
+		if probe.Namespace == obj.Namespace && probe.Name == obj.Name {
+			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: obj.Spec.NodeName}})
+			break
+		}
+	}
+}
+func (p *enqueueRequestForPod) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+}
+
+func (p *enqueueRequestForPod) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+	new, ok := evt.ObjectNew.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	old, ok := evt.ObjectOld.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	// remove pod probe from nodePodProbe.spec
+	if new.Spec.NodeName != "" && kubecontroller.IsPodActive(old) && !kubecontroller.IsPodActive(new) {
+		npp := &appsalphav1.NodePodProbe{}
+		if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: new.Spec.NodeName}, npp); err != nil {
+			if !errors.IsNotFound(err) {
+				klog.Errorf("Get NodePodProbe(%s) failed: %s", new.Spec.NodeName)
+			}
+			return
+		}
+		for _, probe := range npp.Spec.PodProbes {
+			if probe.Namespace == new.Namespace && probe.Name == new.Name {
+				q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: new.Spec.NodeName}})
+				break
+			}
+		}
+	}
 }

@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"reflect"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -41,7 +43,6 @@ import (
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 )
 
 func init() {
@@ -81,74 +82,6 @@ func Add(mgr manager.Manager) error {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
-}
-
-// newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	cli := utilclient.NewClientFromManager(mgr, "uniteddeployment-controller")
-	return &ReconcileUnitedDeployment{
-		Client: cli,
-		scheme: mgr.GetScheme(),
-
-		recorder: mgr.GetEventRecorderFor(controllerName),
-		subSetControls: map[subSetType]ControlInterface{
-			statefulSetSubSetType:         &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.StatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
-			advancedStatefulSetSubSetType: &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.AdvancedStatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
-			cloneSetSubSetType:            &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.CloneSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
-			deploymentSubSetType:          &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.DeploymentAdapter{Client: cli, Scheme: mgr.GetScheme()}},
-		},
-	}
-}
-
-// add adds a new Controller to mgr with r as the reconcile.Reconciler
-func add(mgr manager.Manager, r reconcile.Reconciler) error {
-	// Create a new controller
-	c, err := controller.New(controllerName, mgr, controller.Options{
-		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles, CacheSyncTimeout: util.GetControllerCacheSyncTimeout(),
-		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
-	if err != nil {
-		return err
-	}
-
-	// Watch for changes to UnitedDeployment
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.UnitedDeployment{}}, &handler.EnqueueRequestForObject{})
-	if err != nil {
-		return err
-	}
-
-	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.UnitedDeployment{},
-	})
-	if err != nil {
-		return err
-	}
-
-	err = c.Watch(&source.Kind{Type: &appsv1beta1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.UnitedDeployment{},
-	})
-	if err != nil {
-		return err
-	}
-
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.UnitedDeployment{},
-	})
-	if err != nil {
-		return err
-	}
-
-	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.UnitedDeployment{},
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 var _ reconcile.Reconciler = &ReconcileUnitedDeployment{}
@@ -245,45 +178,6 @@ func (r *ReconcileUnitedDeployment) Reconcile(_ context.Context, request reconci
 	return r.updateStatus(instance, newStatus, oldStatus, nameToSubset, nextReplicas, nextPartitions, currentRevision, updatedRevision, collisionCount, control)
 }
 
-func (r *ReconcileUnitedDeployment) getNameToSubset(instance *appsv1alpha1.UnitedDeployment, control ControlInterface, expectedRevision string) (*map[string]*Subset, error) {
-	subSets, err := control.GetAllSubsets(instance, expectedRevision)
-	if err != nil {
-		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeFindSubsets), err.Error())
-		return nil, fmt.Errorf("fail to get all Subsets for UnitedDeployment %s/%s: %s", instance.Namespace, instance.Name, err)
-	}
-
-	klog.V(4).Infof("Classify UnitedDeployment %s/%s by subSet name", instance.Namespace, instance.Name)
-	nameToSubsets := r.classifySubsetBySubsetName(instance, subSets)
-
-	nameToSubset, err := r.deleteDupSubset(instance, nameToSubsets, control)
-	if err != nil {
-		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeDupSubsetsDelete), err.Error())
-		return nil, fmt.Errorf("fail to manage duplicate Subset of UnitedDeployment %s/%s: %s", instance.Namespace, instance.Name, err)
-	}
-
-	return nameToSubset, nil
-}
-
-func calcNextPartitions(ud *appsv1alpha1.UnitedDeployment, nextReplicas *map[string]int32) *map[string]int32 {
-	partitions := map[string]int32{}
-	for _, subset := range ud.Spec.Topology.Subsets {
-		var subsetPartition int32
-		if ud.Spec.UpdateStrategy.Type == appsv1alpha1.ManualUpdateStrategyType && ud.Spec.UpdateStrategy.ManualUpdate != nil && ud.Spec.UpdateStrategy.ManualUpdate.Partitions != nil {
-			if partition, exist := ud.Spec.UpdateStrategy.ManualUpdate.Partitions[subset.Name]; exist {
-				subsetPartition = partition
-			}
-		}
-
-		if subsetReplicas, exist := (*nextReplicas)[subset.Name]; exist && subsetPartition > subsetReplicas {
-			subsetPartition = subsetReplicas
-		}
-
-		partitions[subset.Name] = subsetPartition
-	}
-
-	return &partitions
-}
-
 func getNextUpdate(ud *appsv1alpha1.UnitedDeployment, nextReplicas *map[string]int32, nextPartitions *map[string]int32) map[string]SubsetUpdate {
 	next := make(map[string]SubsetUpdate)
 	for _, subset := range ud.Spec.Topology.Subsets {
@@ -295,66 +189,6 @@ func getNextUpdate(ud *appsv1alpha1.UnitedDeployment, nextReplicas *map[string]i
 		next[subset.Name] = t
 	}
 	return next
-}
-
-func (r *ReconcileUnitedDeployment) deleteDupSubset(ud *appsv1alpha1.UnitedDeployment, nameToSubsets map[string][]*Subset, control ControlInterface) (*map[string]*Subset, error) {
-	nameToSubset := map[string]*Subset{}
-	for name, subsets := range nameToSubsets {
-		if len(subsets) > 1 {
-			for _, subset := range subsets[1:] {
-				klog.V(0).Infof("Delete duplicated Subset %s/%s for subset name %s", subset.Namespace, subset.Name, name)
-				if err := control.DeleteSubset(subset); err != nil {
-					if errors.IsNotFound(err) {
-						continue
-					}
-
-					return &nameToSubset, err
-				}
-			}
-		}
-
-		if len(subsets) > 0 {
-			nameToSubset[name] = subsets[0]
-		}
-	}
-
-	return &nameToSubset, nil
-}
-
-func (r *ReconcileUnitedDeployment) getSubsetControls(instance *appsv1alpha1.UnitedDeployment) (ControlInterface, subSetType) {
-	if instance.Spec.Template.StatefulSetTemplate != nil {
-		return r.subSetControls[statefulSetSubSetType], statefulSetSubSetType
-	}
-
-	if instance.Spec.Template.AdvancedStatefulSetTemplate != nil {
-		return r.subSetControls[advancedStatefulSetSubSetType], advancedStatefulSetSubSetType
-	}
-
-	if instance.Spec.Template.CloneSetTemplate != nil {
-		return r.subSetControls[cloneSetSubSetType], cloneSetSubSetType
-	}
-
-	if instance.Spec.Template.DeploymentTemplate != nil {
-		return r.subSetControls[deploymentSubSetType], deploymentSubSetType
-	}
-
-	// unexpected
-	return nil, statefulSetSubSetType
-}
-
-func (r *ReconcileUnitedDeployment) classifySubsetBySubsetName(ud *appsv1alpha1.UnitedDeployment, subsets []*Subset) map[string][]*Subset {
-	mapping := map[string][]*Subset{}
-
-	for _, ss := range subsets {
-		subSetName, err := getSubsetNameFrom(ss)
-		if err != nil {
-			// filter out Subset without correct Subset name
-			continue
-		}
-
-		mapping[subSetName] = append(mapping[subSetName], ss)
-	}
-	return mapping
 }
 
 func (r *ReconcileUnitedDeployment) updateStatus(instance *appsv1alpha1.UnitedDeployment, newStatus, oldStatus *appsv1alpha1.UnitedDeploymentStatus, nameToSubset *map[string]*Subset, nextReplicas, nextPartition *map[string]int32, currentRevision, updatedRevision *appsv1.ControllerRevision, collisionCount int32, control ControlInterface) (reconcile.Result, error) {
@@ -473,4 +307,169 @@ func (r *ReconcileUnitedDeployment) updateUnitedDeployment(ud *appsv1alpha1.Unit
 
 	klog.Errorf("fail to update UnitedDeployment %s/%s status: %s", ud.Namespace, ud.Name, updateErr)
 	return nil, updateErr
+}
+
+// newReconciler returns a new reconcile.Reconciler
+func newReconciler(mgr manager.Manager) reconcile.Reconciler {
+	cli := utilclient.NewClientFromManager(mgr, "uniteddeployment-controller")
+	return &ReconcileUnitedDeployment{
+		Client: cli,
+		scheme: mgr.GetScheme(),
+
+		recorder: mgr.GetEventRecorderFor(controllerName),
+		subSetControls: map[subSetType]ControlInterface{
+			statefulSetSubSetType:         &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.StatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			advancedStatefulSetSubSetType: &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.AdvancedStatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			cloneSetSubSetType:            &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.CloneSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			deploymentSubSetType:          &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.DeploymentAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+		},
+	}
+}
+
+// add adds a new Controller to mgr with r as the reconcile.Reconciler
+func add(mgr manager.Manager, r reconcile.Reconciler) error {
+	// Create a new controller
+	c, err := controller.New(controllerName, mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles, CacheSyncTimeout: util.GetControllerCacheSyncTimeout(),
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
+	if err != nil {
+		return err
+	}
+
+	// Watch for changes to UnitedDeployment
+	err = c.Watch(&source.Kind{Type: &appsv1alpha1.UnitedDeployment{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1beta1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *ReconcileUnitedDeployment) getSubsetControls(instance *appsv1alpha1.UnitedDeployment) (ControlInterface, subSetType) {
+	if instance.Spec.Template.StatefulSetTemplate != nil {
+		return r.subSetControls[statefulSetSubSetType], statefulSetSubSetType
+	}
+
+	if instance.Spec.Template.AdvancedStatefulSetTemplate != nil {
+		return r.subSetControls[advancedStatefulSetSubSetType], advancedStatefulSetSubSetType
+	}
+
+	if instance.Spec.Template.CloneSetTemplate != nil {
+		return r.subSetControls[cloneSetSubSetType], cloneSetSubSetType
+	}
+
+	if instance.Spec.Template.DeploymentTemplate != nil {
+		return r.subSetControls[deploymentSubSetType], deploymentSubSetType
+	}
+
+	// unexpected
+	return nil, statefulSetSubSetType
+}
+
+func (r *ReconcileUnitedDeployment) getNameToSubset(instance *appsv1alpha1.UnitedDeployment, control ControlInterface, expectedRevision string) (*map[string]*Subset, error) {
+	subSets, err := control.GetAllSubsets(instance, expectedRevision)
+	if err != nil {
+		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeFindSubsets), err.Error())
+		return nil, fmt.Errorf("fail to get all Subsets for UnitedDeployment %s/%s: %s", instance.Namespace, instance.Name, err)
+	}
+
+	klog.V(4).Infof("Classify UnitedDeployment %s/%s by subSet name", instance.Namespace, instance.Name)
+	nameToSubsets := r.classifySubsetBySubsetName(instance, subSets)
+
+	nameToSubset, err := r.deleteDupSubset(instance, nameToSubsets, control)
+	if err != nil {
+		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeDupSubsetsDelete), err.Error())
+		return nil, fmt.Errorf("fail to manage duplicate Subset of UnitedDeployment %s/%s: %s", instance.Namespace, instance.Name, err)
+	}
+
+	return nameToSubset, nil
+}
+
+func (r *ReconcileUnitedDeployment) classifySubsetBySubsetName(ud *appsv1alpha1.UnitedDeployment, subsets []*Subset) map[string][]*Subset {
+	mapping := map[string][]*Subset{}
+
+	for _, ss := range subsets {
+		subSetName, err := getSubsetNameFrom(ss)
+		if err != nil {
+			// filter out Subset without correct Subset name
+			continue
+		}
+
+		mapping[subSetName] = append(mapping[subSetName], ss)
+	}
+	return mapping
+}
+func (r *ReconcileUnitedDeployment) deleteDupSubset(ud *appsv1alpha1.UnitedDeployment, nameToSubsets map[string][]*Subset, control ControlInterface) (*map[string]*Subset, error) {
+	nameToSubset := map[string]*Subset{}
+	for name, subsets := range nameToSubsets {
+		if len(subsets) > 1 {
+			for _, subset := range subsets[1:] {
+				klog.V(0).Infof("Delete duplicated Subset %s/%s for subset name %s", subset.Namespace, subset.Name, name)
+				if err := control.DeleteSubset(subset); err != nil {
+					if errors.IsNotFound(err) {
+						continue
+					}
+
+					return &nameToSubset, err
+				}
+			}
+		}
+
+		if len(subsets) > 0 {
+			nameToSubset[name] = subsets[0]
+		}
+	}
+
+	return &nameToSubset, nil
+}
+func calcNextPartitions(ud *appsv1alpha1.UnitedDeployment, nextReplicas *map[string]int32) *map[string]int32 {
+	partitions := map[string]int32{}
+	for _, subset := range ud.Spec.Topology.Subsets {
+		var subsetPartition int32
+		if ud.Spec.UpdateStrategy.Type == appsv1alpha1.ManualUpdateStrategyType && ud.Spec.UpdateStrategy.ManualUpdate != nil && ud.Spec.UpdateStrategy.ManualUpdate.Partitions != nil {
+			if partition, exist := ud.Spec.UpdateStrategy.ManualUpdate.Partitions[subset.Name]; exist {
+				subsetPartition = partition
+			}
+		}
+
+		if subsetReplicas, exist := (*nextReplicas)[subset.Name]; exist && subsetPartition > subsetReplicas {
+			subsetPartition = subsetReplicas
+		}
+
+		partitions[subset.Name] = subsetPartition
+	}
+
+	return &partitions
 }

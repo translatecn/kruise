@@ -22,10 +22,11 @@ import (
 	"net/http"
 	"regexp"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/controller/broadcastjob"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 	v1 "k8s.io/api/core/v1"
 	genericvalidation "k8s.io/apimachinery/pkg/api/validation"
 	validationutil "k8s.io/apimachinery/pkg/util/validation"

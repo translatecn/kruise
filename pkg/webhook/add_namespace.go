@@ -17,7 +17,7 @@ limitations under the License.
 package webhook
 
 import (
-	"github.com/openkruise/kruise/pkg/webhook/namespace/validating"
+	"github.com/openkruise/kruise/pkg/webhook/delete_namespace/validating"
 )
 
 func init() {

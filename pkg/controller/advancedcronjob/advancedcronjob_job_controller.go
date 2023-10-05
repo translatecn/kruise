@@ -156,6 +156,7 @@ func (r *ReconcileAdvancedCronJob) reconcileJob(ctx context.Context, req ctrl.Re
 			if int32(i) >= int32(len(failedJobs))-*advancedCronJob.Spec.FailedJobsHistoryLimit {
 				break
 			}
+			// 删除最早的
 			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
 				klog.Error(err, "unable to delete old failed job ", job.Name, req.NamespacedName)
 			} else {

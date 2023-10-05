@@ -69,6 +69,18 @@ func GetPPSWatchCustomWorkloadWhiteList(client client.Client) (*CustomWorkloadWh
 	return whiteList, nil
 }
 
+func getKruiseConfiguration(c client.Reader) (map[string]string, error) {
+	cfg := &corev1.ConfigMap{}
+	err := c.Get(context.TODO(), client.ObjectKey{Namespace: util.GetKruiseNamespace(), Name: KruiseConfigurationName}, cfg)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	return cfg.Data, nil
+}
+
 func GetWSWatchCustomWorkloadWhiteList(client client.Reader) (WSCustomWorkloadWhiteList, error) {
 	whiteList := WSCustomWorkloadWhiteList{}
 	data, err := getKruiseConfiguration(client)
@@ -85,16 +97,4 @@ func GetWSWatchCustomWorkloadWhiteList(client client.Reader) (WSCustomWorkloadWh
 		return whiteList, err
 	}
 	return whiteList, nil
-}
-
-func getKruiseConfiguration(c client.Reader) (map[string]string, error) {
-	cfg := &corev1.ConfigMap{}
-	err := c.Get(context.TODO(), client.ObjectKey{Namespace: util.GetKruiseNamespace(), Name: KruiseConfigurationName}, cfg)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return map[string]string{}, nil
-		}
-		return nil, err
-	}
-	return cfg.Data, nil
 }

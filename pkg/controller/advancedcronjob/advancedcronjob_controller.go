@@ -100,6 +100,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 	return nil
 }
+func (r *ReconcileAdvancedCronJob) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&appsv1alpha1.AdvancedCronJob{}).
+		Complete(r)
+}
 
 type realClock struct{}
 
@@ -158,12 +163,6 @@ func (r *ReconcileAdvancedCronJob) Reconcile(_ context.Context, req ctrl.Request
 	}
 
 	return ctrl.Result{}, nil
-}
-
-func (r *ReconcileAdvancedCronJob) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.AdvancedCronJob{}).
-		Complete(r)
 }
 
 func (r *ReconcileAdvancedCronJob) updateAdvancedJobStatus(request reconcile.Request, advancedCronJob *appsv1alpha1.AdvancedCronJob) error {

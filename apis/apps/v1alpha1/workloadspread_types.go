@@ -54,8 +54,10 @@ type WorkloadSpreadScheduleStrategyType string
 const (
 	// AdaptiveWorkloadSpreadScheduleStrategyType represents that user can permit that controller reschedule Pod
 	// or simulate a schedule process to check whether Pod can run in some subset.
+	// 表示用户可以允许控制器重新调度Pod或模拟调度过程来检查Pod是否可以在某个子集中运行。
 	AdaptiveWorkloadSpreadScheduleStrategyType WorkloadSpreadScheduleStrategyType = "Adaptive"
 	// FixedWorkloadSpreadScheduleStrategyType represents to give up reschedule and simulation schedule feature.
+	// 表示放弃重排和模拟排程特性。
 	FixedWorkloadSpreadScheduleStrategyType WorkloadSpreadScheduleStrategyType = "Fixed"
 )
 

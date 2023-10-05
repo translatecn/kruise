@@ -20,8 +20,9 @@ import (
 	"context"
 	"time"
 
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	"github.com/openkruise/kruise/pkg/util"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilpodreadiness "github.com/openkruise/kruise/pkg/util/podreadiness"
 	v1 "k8s.io/api/core/v1"

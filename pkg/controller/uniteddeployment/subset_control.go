@@ -28,7 +28,7 @@ import (
 
 	alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/controller/uniteddeployment/adapter"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
+	refmanager "github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
 // SubsetControl provides subset operations of MutableSet.
@@ -37,44 +37,6 @@ type SubsetControl struct {
 
 	scheme  *runtime.Scheme
 	adapter adapter.Adapter
-}
-
-// GetAllSubsets returns all of subsets owned by the UnitedDeployment.
-func (m *SubsetControl) GetAllSubsets(ud *alpha1.UnitedDeployment, updatedRevision string) (subSets []*Subset, err error) {
-	selector, err := metav1.LabelSelectorAsSelector(ud.Spec.Selector)
-	if err != nil {
-		return nil, err
-	}
-
-	setList := m.adapter.NewResourceListObject()
-	err = m.Client.List(context.TODO(), setList, &client.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return nil, err
-	}
-
-	manager, err := refmanager.New(m.Client, ud.Spec.Selector, ud, m.scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	v := reflect.ValueOf(setList).Elem().FieldByName("Items")
-	selected := make([]metav1.Object, v.Len())
-	for i := 0; i < v.Len(); i++ {
-		selected[i] = v.Index(i).Addr().Interface().(metav1.Object)
-	}
-	claimedSets, err := manager.ClaimOwnedObjects(selected)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, claimedSet := range claimedSets {
-		subSet, err := m.convertToSubset(claimedSet, updatedRevision)
-		if err != nil {
-			return nil, err
-		}
-		subSets = append(subSets, subSet)
-	}
-	return subSets, nil
 }
 
 // CreateSubset creates the Subset depending on the inputs.
@@ -186,4 +148,42 @@ func (m *SubsetControl) objectKey(objMeta *metav1.ObjectMeta) client.ObjectKey {
 		Namespace: objMeta.Namespace,
 		Name:      objMeta.Name,
 	}
+}
+
+// GetAllSubsets returns all of subsets owned by the UnitedDeployment.
+func (m *SubsetControl) GetAllSubsets(ud *alpha1.UnitedDeployment, updatedRevision string) (subSets []*Subset, err error) {
+	selector, err := metav1.LabelSelectorAsSelector(ud.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+
+	setList := m.adapter.NewResourceListObject()
+	err = m.Client.List(context.TODO(), setList, &client.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+
+	manager, err := refmanager.New(m.Client, ud.Spec.Selector, ud, m.scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	v := reflect.ValueOf(setList).Elem().FieldByName("Items")
+	selected := make([]metav1.Object, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		selected[i] = v.Index(i).Addr().Interface().(metav1.Object)
+	}
+	claimedSets, err := manager.ClaimOwnedObjects(selected)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, claimedSet := range claimedSets {
+		subSet, err := m.convertToSubset(claimedSet, updatedRevision)
+		if err != nil {
+			return nil, err
+		}
+		subSets = append(subSets, subSet)
+	}
+	return subSets, nil
 }

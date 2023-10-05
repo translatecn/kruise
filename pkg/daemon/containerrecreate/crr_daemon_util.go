@@ -35,29 +35,6 @@ const (
 	CRRPodNameIndex = "podName"
 )
 
-type crrListByPhaseAndCreated []*appsv1alpha1.ContainerRecreateRequest
-
-func (c crrListByPhaseAndCreated) Len() int      { return len(c) }
-func (c crrListByPhaseAndCreated) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
-func (c crrListByPhaseAndCreated) Less(i, j int) bool {
-	if c[i].Status.Phase == c[j].Status.Phase {
-		return c[i].CreationTimestamp.Before(&c[j].CreationTimestamp)
-	}
-	return c.phaseWeight(c[i].Status.Phase) < c.phaseWeight(c[j].Status.Phase)
-}
-
-func (c crrListByPhaseAndCreated) phaseWeight(phase appsv1alpha1.ContainerRecreateRequestPhase) int {
-	switch phase {
-	case appsv1alpha1.ContainerRecreateRequestCompleted:
-		return 1
-	case appsv1alpha1.ContainerRecreateRequestRecreating:
-		return 2
-	case appsv1alpha1.ContainerRecreateRequestPending:
-		return 3
-	}
-	return 4
-}
-
 func getCurrentCRRContainersRecreateStates(
 	crr *appsv1alpha1.ContainerRecreateRequest,
 	podStatus *kubeletcontainer.PodStatus,
@@ -173,6 +150,38 @@ func getCRRSyncContainerStatuses(crr *appsv1alpha1.ContainerRecreateRequest) map
 	return statuses
 }
 
+// SpecPodNameIndexFunc is a default index function that indexes based on crr.spec.podName
+func SpecPodNameIndexFunc(obj interface{}) ([]string, error) {
+	crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
+	if !ok {
+		return []string{""}, fmt.Errorf("object cannot be convert to CRR")
+	}
+	return []string{crr.Spec.PodName}, nil
+}
+
+type crrListByPhaseAndCreated []*appsv1alpha1.ContainerRecreateRequest
+
+func (c crrListByPhaseAndCreated) Len() int      { return len(c) }
+func (c crrListByPhaseAndCreated) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
+func (c crrListByPhaseAndCreated) Less(i, j int) bool {
+	if c[i].Status.Phase == c[j].Status.Phase {
+		return c[i].CreationTimestamp.Before(&c[j].CreationTimestamp)
+	}
+	return c.phaseWeight(c[i].Status.Phase) < c.phaseWeight(c[j].Status.Phase)
+}
+
+func (c crrListByPhaseAndCreated) phaseWeight(phase appsv1alpha1.ContainerRecreateRequestPhase) int {
+	switch phase {
+	case appsv1alpha1.ContainerRecreateRequestCompleted:
+		return 1
+	case appsv1alpha1.ContainerRecreateRequestRecreating:
+		return 2
+	case appsv1alpha1.ContainerRecreateRequestPending:
+		return 3
+	}
+	return 4
+}
+
 func convertCRRToPod(crr *appsv1alpha1.ContainerRecreateRequest) *v1.Pod {
 	podName := crr.Spec.PodName
 	podUID := types.UID(crr.Labels[appsv1alpha1.ContainerRecreateRequestPodUIDKey])
@@ -209,13 +218,4 @@ func convertCRRToPod(crr *appsv1alpha1.ContainerRecreateRequest) *v1.Pod {
 	}
 
 	return pod
-}
-
-// SpecPodNameIndexFunc is a default index function that indexes based on crr.spec.podName
-func SpecPodNameIndexFunc(obj interface{}) ([]string, error) {
-	crr, ok := obj.(*appsv1alpha1.ContainerRecreateRequest)
-	if !ok {
-		return []string{""}, fmt.Errorf("object cannot be convert to CRR")
-	}
-	return []string{crr.Spec.PodName}, nil
 }

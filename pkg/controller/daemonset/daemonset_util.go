@@ -26,7 +26,7 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruiseutil "github.com/openkruise/kruise/pkg/util"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/lifecycle"
+	lifecycle "github.com/openkruise/kruise/pkg/util/lifecycle"
 
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -49,16 +49,6 @@ var (
 type newPodForDS struct {
 	generation int64
 	pod        *corev1.Pod
-}
-
-func loadNewPodForDS(ds *appsv1alpha1.DaemonSet) *corev1.Pod {
-	if val, ok := newPodForDSCache.Load(ds.UID); ok {
-		newPodCache := val.(*newPodForDS)
-		if newPodCache.generation >= ds.Generation {
-			return newPodCache.pod
-		}
-	}
-	return nil
 }
 
 // nodeInSameCondition returns true if all effective types ("Status" is true) equals;
@@ -88,39 +78,6 @@ func nodeInSameCondition(old []corev1.NodeCondition, cur []corev1.NodeCondition)
 	}
 
 	return len(c1map) == 0
-}
-
-// nodeShouldRunDaemonPod checks a set of preconditions against a (node,daemonset) and returns a
-// summary. Returned booleans are:
-//   - shouldRun:
-//     Returns true when a daemonset should run on the node if a daemonset pod is not already
-//     running on that node.
-//   - shouldContinueRunning:
-//     Returns true when a daemonset should continue running on a node if a daemonset pod is already
-//     running on that node.
-func nodeShouldRunDaemonPod(node *corev1.Node, ds *appsv1alpha1.DaemonSet) (bool, bool) {
-	pod := NewPod(ds, node.Name)
-
-	// If the daemon set specifies a node name, check that it matches with node.Name.
-	if !(ds.Spec.Template.Spec.NodeName == "" || ds.Spec.Template.Spec.NodeName == node.Name) {
-		return false, false
-	}
-
-	taints := node.Spec.Taints
-	fitsNodeName, fitsNodeAffinity, fitsTaints := Predicates(pod, node, taints)
-	if !fitsNodeName || !fitsNodeAffinity {
-		return false, false
-	}
-
-	if !fitsTaints {
-		// Scheduled daemon pods should continue running if they tolerate NoExecute taint.
-		_, hasUntoleratedTaint := v1helper.FindMatchingUntoleratedTaint(taints, pod.Spec.Tolerations, func(t *corev1.Taint) bool {
-			return t.Effect == corev1.TaintEffectNoExecute
-		})
-		return false, !hasUntoleratedTaint
-	}
-
-	return true, true
 }
 
 func shouldIgnoreNodeUpdate(oldNode, curNode corev1.Node) bool {
@@ -246,29 +203,6 @@ func isDaemonSetPaused(ds *appsv1alpha1.DaemonSet) bool {
 	return ds.Spec.UpdateStrategy.RollingUpdate != nil && ds.Spec.UpdateStrategy.RollingUpdate.Paused != nil && *ds.Spec.UpdateStrategy.RollingUpdate.Paused
 }
 
-// allowSurge returns true if the daemonset allows more than a single pod on any node.
-func allowSurge(ds *appsv1alpha1.DaemonSet) bool {
-	maxSurge, err := surgeCount(ds, 1)
-	return err == nil && maxSurge > 0
-}
-
-// surgeCount returns 0 if surge is not requested, the expected surge number to allow
-// out of numberToSchedule if surge is configured, or an error if the surge percentage
-// requested is invalid.
-func surgeCount(ds *appsv1alpha1.DaemonSet, numberToSchedule int) (int, error) {
-	if ds.Spec.UpdateStrategy.Type != appsv1alpha1.RollingUpdateDaemonSetStrategyType {
-		return 0, nil
-	}
-	r := ds.Spec.UpdateStrategy.RollingUpdate
-	if r == nil {
-		return 0, nil
-	}
-	if r.MaxSurge == nil {
-		return 0, nil
-	}
-	return intstrutil.GetScaledValueFromIntOrPercent(r.MaxSurge, numberToSchedule, true)
-}
-
 // unavailableCount returns 0 if unavailability is not requested, the expected
 // unavailability number to allow out of numberToSchedule if requested, or an error if
 // the unavailability percentage requested is invalid.
@@ -370,4 +304,69 @@ func podAvailableWaitingTime(pod *corev1.Pod, minReadySeconds int32, now time.Ti
 		return minReadySecondsDuration
 	}
 	return minReadySecondsDuration - now.Sub(c.LastTransitionTime.Time)
+}
+func loadNewPodForDS(ds *appsv1alpha1.DaemonSet) *corev1.Pod {
+	if val, ok := newPodForDSCache.Load(ds.UID); ok {
+		newPodCache := val.(*newPodForDS)
+		if newPodCache.generation >= ds.Generation {
+			return newPodCache.pod
+		}
+	}
+	return nil
+}
+
+// nodeShouldRunDaemonPod checks a set of preconditions against a (node,daemonset) and returns a
+// summary. Returned booleans are:
+//   - shouldRun:
+//     Returns true when a daemonset should run on the node if a daemonset pod is not already
+//     running on that node.
+//   - shouldContinueRunning:
+//     Returns true when a daemonset should continue running on a node if a daemonset pod is already
+//     running on that node.
+func nodeShouldRunDaemonPod(node *corev1.Node, ds *appsv1alpha1.DaemonSet) (bool, bool) {
+	pod := NewPod(ds, node.Name)
+
+	// If the daemon set specifies a node name, check that it matches with node.Name.
+	if !(ds.Spec.Template.Spec.NodeName == "" || ds.Spec.Template.Spec.NodeName == node.Name) {
+		return false, false
+	}
+
+	taints := node.Spec.Taints
+	fitsNodeName, fitsNodeAffinity, fitsTaints := Predicates(pod, node, taints)
+	if !fitsNodeName || !fitsNodeAffinity {
+		return false, false
+	}
+
+	if !fitsTaints {
+		// Scheduled daemon pods should continue running if they tolerate NoExecute taint.
+		_, hasUntoleratedTaint := v1helper.FindMatchingUntoleratedTaint(taints, pod.Spec.Tolerations, func(t *corev1.Taint) bool {
+			return t.Effect == corev1.TaintEffectNoExecute
+		})
+		return false, !hasUntoleratedTaint
+	}
+
+	return true, true
+}
+
+// allowSurge returns true if the daemonset allows more than a single pod on any node.
+func allowSurge(ds *appsv1alpha1.DaemonSet) bool {
+	maxSurge, err := surgeCount(ds, 1)
+	return err == nil && maxSurge > 0
+}
+
+// surgeCount returns 0 if surge is not requested, the expected surge number to allow
+// out of numberToSchedule if surge is configured, or an error if the surge percentage
+// requested is invalid.
+func surgeCount(ds *appsv1alpha1.DaemonSet, numberToSchedule int) (int, error) {
+	if ds.Spec.UpdateStrategy.Type != appsv1alpha1.RollingUpdateDaemonSetStrategyType {
+		return 0, nil
+	}
+	r := ds.Spec.UpdateStrategy.RollingUpdate
+	if r == nil {
+		return 0, nil
+	}
+	if r.MaxSurge == nil {
+		return 0, nil
+	}
+	return intstrutil.GetScaledValueFromIntOrPercent(r.MaxSurge, numberToSchedule, true)
 }

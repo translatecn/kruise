@@ -21,9 +21,9 @@ import (
 	"errors"
 	"time"
 
-	"k8s.io/klog/v2"
-
 	"github.com/openkruise/kruise/pkg/webhook/util/generator"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -43,6 +43,24 @@ const (
 type CertWriter interface {
 	// EnsureCert provisions the cert for the webhookClientConfig.
 	EnsureCert(dnsName string) (*generator.Artifacts, bool, error)
+}
+
+// certReadWriter provides methods for reading and writing certificates.
+type certReadWriter interface {
+	// read a webhook name and returns the certs for it.
+	read() (*generator.Artifacts, error)
+	// write the certs and return the certs it wrote.
+	write() (*generator.Artifacts, error)
+	// overwrite the existing certs and return the certs it wrote.
+	overwrite(resourceVersion string) (*generator.Artifacts, error)
+}
+
+func validCert(certs *generator.Artifacts, dnsName string) bool {
+	if certs == nil {
+		return false
+	}
+	expired := time.Now().AddDate(0, 6, 0)
+	return generator.ValidCACert(certs.Key, certs.Cert, certs.CACert, dnsName, expired)
 }
 
 // handleCommon ensures the given webhook has a proper certificate.
@@ -86,22 +104,4 @@ func createIfNotExists(ch certReadWriter) (*generator.Artifacts, bool, error) {
 		return certs, true, err
 	}
 	return certs, false, err
-}
-
-// certReadWriter provides methods for reading and writing certificates.
-type certReadWriter interface {
-	// read a webhook name and returns the certs for it.
-	read() (*generator.Artifacts, error)
-	// write the certs and return the certs it wrote.
-	write() (*generator.Artifacts, error)
-	// overwrite the existing certs and return the certs it wrote.
-	overwrite(resourceVersion string) (*generator.Artifacts, error)
-}
-
-func validCert(certs *generator.Artifacts, dnsName string) bool {
-	if certs == nil {
-		return false
-	}
-	expired := time.Now().AddDate(0, 6, 0)
-	return generator.ValidCACert(certs.Key, certs.Cert, certs.CACert, dnsName, expired)
 }

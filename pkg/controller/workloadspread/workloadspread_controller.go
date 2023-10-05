@@ -25,6 +25,10 @@ import (
 	"strings"
 	"time"
 
+	requeueduration "github.com/openkruise/kruise/pkg/util/requeueduration"
+
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -49,12 +53,10 @@ import (
 	ctrlUtil "github.com/openkruise/kruise/pkg/controller/util"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/configuration"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	configuration "github.com/openkruise/kruise/pkg/util/configuration"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/fieldindex"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
-	"github.com/openkruise/kruise/pkg/util/requeueduration"
+	fieldindex "github.com/openkruise/kruise/pkg/util/fieldindex"
 	wsutil "github.com/openkruise/kruise/pkg/util/workloadspread"
 )
 
@@ -231,6 +233,176 @@ func (r *ReconcileWorkloadSpread) Reconcile(_ context.Context, req reconcile.Req
 	return reconcile.Result{RequeueAfter: durationStore.Pop(getWorkloadSpreadKey(ws))}, err
 }
 
+// syncWorkloadSpread is the main logic of the WorkloadSpread controller. Firstly, we get Pods from workload managed by
+// WorkloadSpread and then classify these Pods to each corresponding subset. Secondly, we set Pod deletion-cost annotation
+// value by compare the number of subset's Pods with the subset's maxReplicas, and then we consider rescheduling failed Pods.
+// Lastly, we update the WorkloadSpread's Status and clean up scheduled failed Pods. controller should collaborate with webhook
+// to maintain WorkloadSpread status together. The controller is responsible for calculating the real status, and the webhook
+// mainly counts missingReplicas and records the creation or deletion entry of Pod into map.
+func (r *ReconcileWorkloadSpread) syncWorkloadSpread(ws *appsv1alpha1.WorkloadSpread) error {
+	pods, workloadReplicas, err := r.getPodsForWorkloadSpread(ws) // 当前 控制的pod ,以及总的副本数
+	if err != nil || workloadReplicas == -1 {
+		if err != nil {
+			klog.Errorf("WorkloadSpread (%s/%s) gets matched pods failed: %v", ws.Namespace, ws.Name, err)
+		}
+		return err
+	}
+	if len(pods) == 0 {
+		klog.Warningf("WorkloadSpread (%s/%s) has no matched pods, target workload's replicas[%d]", ws.Namespace, ws.Name, workloadReplicas)
+	}
+
+	// group Pods by subset
+	podMap, err := r.groupPod(ws, pods, workloadReplicas)
+	if err != nil {
+		return err
+	}
+
+	// update deletion-cost for each subset
+	err = r.updateDeletionCost(ws, podMap, workloadReplicas)
+	if err != nil {
+		return err
+	}
+
+	// calculate status and reschedule
+	status, scheduleFailedPodMap := r.calculateWorkloadSpreadStatus(ws, podMap, workloadReplicas)
+	if status == nil {
+		return nil
+	}
+
+	// update status
+	err = r.UpdateWorkloadSpreadStatus(ws, status)
+	if err != nil {
+		return err
+	}
+
+	// clean up unschedulable Pods
+	return r.cleanupUnscheduledPods(ws, scheduleFailedPodMap)
+}
+
+// groupPod returns a map, the key is the name of subset and the value represents the Pods of the corresponding subset.
+func (r *ReconcileWorkloadSpread) groupPod(ws *appsv1alpha1.WorkloadSpread, pods []*corev1.Pod, replicas int32) (map[string][]*corev1.Pod, error) {
+	podMap := make(map[string][]*corev1.Pod, len(ws.Spec.Subsets)+1)
+	podMap[FakeSubsetName] = []*corev1.Pod{}
+	subsetMissingReplicas := make(map[string]int)
+	for _, subset := range ws.Spec.Subsets {
+		podMap[subset.Name] = []*corev1.Pod{}
+		subsetMissingReplicas[subset.Name], _ = intstr.GetScaledValueFromIntOrPercent(
+			intstr.ValueOrDefault(subset.MaxReplicas, intstr.FromInt(math.MaxInt32)), int(replicas), true)
+	}
+
+	// count managed pods for each subset
+	for i := range pods {
+		injectWS := getInjectWorkloadSpreadFromPod(pods[i])
+		if isNotMatchedWS(injectWS, ws) {
+			continue
+		}
+		if _, exist := podMap[injectWS.Subset]; !exist {
+			continue
+		}
+		subsetMissingReplicas[injectWS.Subset]--
+	}
+
+	for i := range pods {
+		subsetName, err := r.getSuitableSubsetNameForPod(ws, pods[i], subsetMissingReplicas)
+		if err != nil {
+			return nil, err
+		}
+
+		if _, exist := podMap[subsetName]; exist {
+			podMap[subsetName] = append(podMap[subsetName], pods[i])
+		} else {
+			// for the scene where the original subset of the pod was deleted.
+			podMap[FakeSubsetName] = append(podMap[FakeSubsetName], pods[i])
+		}
+	}
+
+	return podMap, nil
+}
+
+func (r *ReconcileWorkloadSpread) UpdateWorkloadSpreadStatus(ws *appsv1alpha1.WorkloadSpread,
+	status *appsv1alpha1.WorkloadSpreadStatus) error {
+	if status.ObservedGeneration == ws.Status.ObservedGeneration &&
+		// status.ObservedWorkloadReplicas == ws.Status.ObservedWorkloadReplicas &&
+		apiequality.Semantic.DeepEqual(status.SubsetStatuses, ws.Status.SubsetStatuses) {
+		return nil
+	}
+
+	clone := ws.DeepCopy()
+	clone.Status = *status
+
+	err := r.writeWorkloadSpreadStatus(clone)
+	if err == nil {
+		klog.V(3).Info(makeStatusChangedLog(ws, status))
+	}
+	return err
+}
+
+func makeStatusChangedLog(ws *appsv1alpha1.WorkloadSpread, status *appsv1alpha1.WorkloadSpreadStatus) string {
+	oldSubsetStatuses := ws.Status.SubsetStatuses
+	oldSubsetStatusMap := make(map[string]*appsv1alpha1.WorkloadSpreadSubsetStatus, len(oldSubsetStatuses))
+	for i := range oldSubsetStatuses {
+		oldSubsetStatusMap[oldSubsetStatuses[i].Name] = &oldSubsetStatuses[i]
+	}
+
+	log := fmt.Sprintf("WorkloadSpread (%s/%s) changes Status:", ws.Namespace, ws.Name)
+
+	for i, subset := range ws.Spec.Subsets {
+		oldStatus, ok := oldSubsetStatusMap[subset.Name]
+		if !ok {
+			continue
+		}
+		newStatus := status.SubsetStatuses[i]
+
+		log += fmt.Sprintf(" (<subset name: %s>", subset.Name)
+
+		if oldStatus.Replicas != newStatus.Replicas {
+			log += fmt.Sprintf(" <Replicas: %d -> %d>", oldStatus.Replicas, newStatus.Replicas)
+		} else {
+			log += fmt.Sprintf(" <Replicas: %d>", newStatus.Replicas)
+		}
+
+		if oldStatus.MissingReplicas != newStatus.MissingReplicas {
+			log += fmt.Sprintf(" <missingReplicas: %d -> %d>", oldStatus.MissingReplicas, newStatus.MissingReplicas)
+		} else {
+			log += fmt.Sprintf(" <missingReplicas: %d>", newStatus.MissingReplicas)
+		}
+
+		if len(oldStatus.CreatingPods) != len(newStatus.CreatingPods) {
+			log += fmt.Sprintf(" <creatingPods length: %d -> %d>", len(oldStatus.CreatingPods), len(newStatus.CreatingPods))
+		} else {
+			log += fmt.Sprintf(" <creatingPods length: %d>", len(newStatus.CreatingPods))
+		}
+
+		if len(oldStatus.DeletingPods) != len(newStatus.DeletingPods) {
+			log += fmt.Sprintf(" <deletingPods length: %d -> %d>", len(oldStatus.DeletingPods), len(newStatus.DeletingPods))
+		} else {
+			log += fmt.Sprintf(" <deletingPods length: %d>", len(newStatus.DeletingPods))
+		}
+
+		log += ")"
+	}
+
+	return log
+}
+
+func (r *ReconcileWorkloadSpread) writeWorkloadSpreadStatus(ws *appsv1alpha1.WorkloadSpread) error {
+	unlock := util.GlobalKeyedMutex.Lock(string(ws.GetUID()))
+	defer unlock()
+	// If this update fails, don't retry it. Allow the failure to get handled &
+	// retried in `processNextWorkItem()`.
+	err := r.Status().Update(context.TODO(), ws)
+	if err == nil {
+		if cacheErr := util.GlobalCache.Add(ws); cacheErr != nil {
+			klog.Warningf("Failed to update workloadSpread(%s/%s) cache after update status, err: %v", ws.Namespace, ws.Name, cacheErr)
+		}
+	}
+	return err
+}
+
+func getWorkloadSpreadKey(o metav1.Object) string {
+	return o.GetNamespace() + "/" + o.GetName()
+}
+
 func (r *ReconcileWorkloadSpread) getPodJob(ref *appsv1alpha1.TargetReference, namespace string) ([]*corev1.Pod, int32, error) {
 	ok, err := wsutil.VerifyGroupKind(ref, controllerKindJob.Kind, []string{controllerKindJob.Group})
 	if err != nil || !ok {
@@ -301,52 +473,6 @@ func (r *ReconcileWorkloadSpread) getPodsForWorkloadSpread(ws *appsv1alpha1.Work
 	return pods, workloadReplicas, err
 }
 
-// syncWorkloadSpread is the main logic of the WorkloadSpread controller. Firstly, we get Pods from workload managed by
-// WorkloadSpread and then classify these Pods to each corresponding subset. Secondly, we set Pod deletion-cost annotation
-// value by compare the number of subset's Pods with the subset's maxReplicas, and then we consider rescheduling failed Pods.
-// Lastly, we update the WorkloadSpread's Status and clean up scheduled failed Pods. controller should collaborate with webhook
-// to maintain WorkloadSpread status together. The controller is responsible for calculating the real status, and the webhook
-// mainly counts missingReplicas and records the creation or deletion entry of Pod into map.
-func (r *ReconcileWorkloadSpread) syncWorkloadSpread(ws *appsv1alpha1.WorkloadSpread) error {
-	pods, workloadReplicas, err := r.getPodsForWorkloadSpread(ws)
-	if err != nil || workloadReplicas == -1 {
-		if err != nil {
-			klog.Errorf("WorkloadSpread (%s/%s) gets matched pods failed: %v", ws.Namespace, ws.Name, err)
-		}
-		return err
-	}
-	if len(pods) == 0 {
-		klog.Warningf("WorkloadSpread (%s/%s) has no matched pods, target workload's replicas[%d]", ws.Namespace, ws.Name, workloadReplicas)
-	}
-
-	// group Pods by subset
-	podMap, err := r.groupPod(ws, pods, workloadReplicas)
-	if err != nil {
-		return err
-	}
-
-	// update deletion-cost for each subset
-	err = r.updateDeletionCost(ws, podMap, workloadReplicas)
-	if err != nil {
-		return err
-	}
-
-	// calculate status and reschedule
-	status, scheduleFailedPodMap := r.calculateWorkloadSpreadStatus(ws, podMap, workloadReplicas)
-	if status == nil {
-		return nil
-	}
-
-	// update status
-	err = r.UpdateWorkloadSpreadStatus(ws, status)
-	if err != nil {
-		return err
-	}
-
-	// clean up unschedulable Pods
-	return r.cleanupUnscheduledPods(ws, scheduleFailedPodMap)
-}
-
 func getInjectWorkloadSpreadFromPod(pod *corev1.Pod) *wsutil.InjectWorkloadSpread {
 	injectStr, exist := pod.GetAnnotations()[wsutil.MatchedWorkloadSpreadSubsetAnnotations]
 	if !exist {
@@ -361,45 +487,11 @@ func getInjectWorkloadSpreadFromPod(pod *corev1.Pod) *wsutil.InjectWorkloadSprea
 	}
 	return injectWS
 }
-
-// groupPod returns a map, the key is the name of subset and the value represents the Pods of the corresponding subset.
-func (r *ReconcileWorkloadSpread) groupPod(ws *appsv1alpha1.WorkloadSpread, pods []*corev1.Pod, replicas int32) (map[string][]*corev1.Pod, error) {
-	podMap := make(map[string][]*corev1.Pod, len(ws.Spec.Subsets)+1)
-	podMap[FakeSubsetName] = []*corev1.Pod{}
-	subsetMissingReplicas := make(map[string]int)
-	for _, subset := range ws.Spec.Subsets {
-		podMap[subset.Name] = []*corev1.Pod{}
-		subsetMissingReplicas[subset.Name], _ = intstr.GetScaledValueFromIntOrPercent(
-			intstr.ValueOrDefault(subset.MaxReplicas, intstr.FromInt(math.MaxInt32)), int(replicas), true)
+func isNotMatchedWS(injectWS *wsutil.InjectWorkloadSpread, ws *appsv1alpha1.WorkloadSpread) bool {
+	if injectWS == nil || injectWS.Name != ws.Name || injectWS.Subset == "" {
+		return true
 	}
-
-	// count managed pods for each subset
-	for i := range pods {
-		injectWS := getInjectWorkloadSpreadFromPod(pods[i])
-		if isNotMatchedWS(injectWS, ws) {
-			continue
-		}
-		if _, exist := podMap[injectWS.Subset]; !exist {
-			continue
-		}
-		subsetMissingReplicas[injectWS.Subset]--
-	}
-
-	for i := range pods {
-		subsetName, err := r.getSuitableSubsetNameForPod(ws, pods[i], subsetMissingReplicas)
-		if err != nil {
-			return nil, err
-		}
-
-		if _, exist := podMap[subsetName]; exist {
-			podMap[subsetName] = append(podMap[subsetName], pods[i])
-		} else {
-			// for the scene where the original subset of the pod was deleted.
-			podMap[FakeSubsetName] = append(podMap[FakeSubsetName], pods[i])
-		}
-	}
-
-	return podMap, nil
+	return false
 }
 
 // getSuitableSubsetNameForPod will return (FakeSubsetName, nil) if not found suitable subset for pod
@@ -543,10 +635,10 @@ func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadStatus(ws *appsv1alpha1
 
 		// don't reschedule the last subset.
 		if rescheduleCriticalSeconds > 0 {
-			if i != len(ws.Spec.Subsets)-1 {
+			if i != len(ws.Spec.Subsets)-1 { // 不是最后一个subset
 				pods := r.rescheduleSubset(ws, podMap[subset.Name], subsetStatus, oldSubsetStatusMap[subset.Name])
 				scheduleFailedPodMap[subset.Name] = pods
-			} else {
+			} else { // 是最后一个subset
 				oldCondition := GetWorkloadSpreadSubsetCondition(oldSubsetStatusMap[subset.Name], appsv1alpha1.SubsetSchedulable)
 				if oldCondition != nil {
 					setWorkloadSpreadSubsetCondition(subsetStatus, oldCondition.DeepCopy())
@@ -564,6 +656,7 @@ func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadStatus(ws *appsv1alpha1
 }
 
 // calculateWorkloadSpreadSubsetStatus returns the current subsetStatus for subset.
+// 返回当前 subset 的状态
 func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadSubsetStatus(ws *appsv1alpha1.WorkloadSpread,
 	pods []*corev1.Pod,
 	subset *appsv1alpha1.WorkloadSpreadSubset,
@@ -603,6 +696,8 @@ func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadSubsetStatus(ws *appsv1
 		oldDeletingPods = oldSubsetStatus.DeletingPods
 	}
 	var active int32
+
+	// 更新记录里  想删、想创建的pod , 如果超时了，则忽略
 
 	for _, pod := range pods {
 		// remove this Pod from creatingPods map because this Pod has been created.
@@ -674,95 +769,4 @@ func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadSubsetStatus(ws *appsv1
 	}
 
 	return subsetStatus
-}
-
-func (r *ReconcileWorkloadSpread) UpdateWorkloadSpreadStatus(ws *appsv1alpha1.WorkloadSpread,
-	status *appsv1alpha1.WorkloadSpreadStatus) error {
-	if status.ObservedGeneration == ws.Status.ObservedGeneration &&
-		// status.ObservedWorkloadReplicas == ws.Status.ObservedWorkloadReplicas &&
-		apiequality.Semantic.DeepEqual(status.SubsetStatuses, ws.Status.SubsetStatuses) {
-		return nil
-	}
-
-	clone := ws.DeepCopy()
-	clone.Status = *status
-
-	err := r.writeWorkloadSpreadStatus(clone)
-	if err == nil {
-		klog.V(3).Info(makeStatusChangedLog(ws, status))
-	}
-	return err
-}
-
-func makeStatusChangedLog(ws *appsv1alpha1.WorkloadSpread, status *appsv1alpha1.WorkloadSpreadStatus) string {
-	oldSubsetStatuses := ws.Status.SubsetStatuses
-	oldSubsetStatusMap := make(map[string]*appsv1alpha1.WorkloadSpreadSubsetStatus, len(oldSubsetStatuses))
-	for i := range oldSubsetStatuses {
-		oldSubsetStatusMap[oldSubsetStatuses[i].Name] = &oldSubsetStatuses[i]
-	}
-
-	log := fmt.Sprintf("WorkloadSpread (%s/%s) changes Status:", ws.Namespace, ws.Name)
-
-	for i, subset := range ws.Spec.Subsets {
-		oldStatus, ok := oldSubsetStatusMap[subset.Name]
-		if !ok {
-			continue
-		}
-		newStatus := status.SubsetStatuses[i]
-
-		log += fmt.Sprintf(" (<subset name: %s>", subset.Name)
-
-		if oldStatus.Replicas != newStatus.Replicas {
-			log += fmt.Sprintf(" <Replicas: %d -> %d>", oldStatus.Replicas, newStatus.Replicas)
-		} else {
-			log += fmt.Sprintf(" <Replicas: %d>", newStatus.Replicas)
-		}
-
-		if oldStatus.MissingReplicas != newStatus.MissingReplicas {
-			log += fmt.Sprintf(" <missingReplicas: %d -> %d>", oldStatus.MissingReplicas, newStatus.MissingReplicas)
-		} else {
-			log += fmt.Sprintf(" <missingReplicas: %d>", newStatus.MissingReplicas)
-		}
-
-		if len(oldStatus.CreatingPods) != len(newStatus.CreatingPods) {
-			log += fmt.Sprintf(" <creatingPods length: %d -> %d>", len(oldStatus.CreatingPods), len(newStatus.CreatingPods))
-		} else {
-			log += fmt.Sprintf(" <creatingPods length: %d>", len(newStatus.CreatingPods))
-		}
-
-		if len(oldStatus.DeletingPods) != len(newStatus.DeletingPods) {
-			log += fmt.Sprintf(" <deletingPods length: %d -> %d>", len(oldStatus.DeletingPods), len(newStatus.DeletingPods))
-		} else {
-			log += fmt.Sprintf(" <deletingPods length: %d>", len(newStatus.DeletingPods))
-		}
-
-		log += ")"
-	}
-
-	return log
-}
-
-func (r *ReconcileWorkloadSpread) writeWorkloadSpreadStatus(ws *appsv1alpha1.WorkloadSpread) error {
-	unlock := util.GlobalKeyedMutex.Lock(string(ws.GetUID()))
-	defer unlock()
-	// If this update fails, don't retry it. Allow the failure to get handled &
-	// retried in `processNextWorkItem()`.
-	err := r.Status().Update(context.TODO(), ws)
-	if err == nil {
-		if cacheErr := util.GlobalCache.Add(ws); cacheErr != nil {
-			klog.Warningf("Failed to update workloadSpread(%s/%s) cache after update status, err: %v", ws.Namespace, ws.Name, cacheErr)
-		}
-	}
-	return err
-}
-
-func getWorkloadSpreadKey(o metav1.Object) string {
-	return o.GetNamespace() + "/" + o.GetName()
-}
-
-func isNotMatchedWS(injectWS *wsutil.InjectWorkloadSpread, ws *appsv1alpha1.WorkloadSpread) bool {
-	if injectWS == nil || injectWS.Name != ws.Name || injectWS.Subset == "" {
-		return true
-	}
-	return false
 }

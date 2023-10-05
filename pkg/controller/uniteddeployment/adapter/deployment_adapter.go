@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/refmanager"
+	refmanager "github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
 // DeploymentAdapter implements the Adapter interface for Deployment objects

@@ -18,7 +18,7 @@ package pubcontrol
 
 import (
 	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

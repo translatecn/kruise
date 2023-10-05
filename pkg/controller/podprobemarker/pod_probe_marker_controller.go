@@ -23,14 +23,15 @@ import (
 	"reflect"
 	"strings"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
-	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	controllerfinder "github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -68,7 +69,8 @@ const (
 // Add creates a new PodProbeMarker Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !utildiscovery.DiscoverGVK(controllerKind) || !utilfeature.DefaultFeatureGate.Enabled(features.PodProbeMarkerGate) {
+	if !utildiscovery.DiscoverGVK(controllerKind) ||
+		!utilfeature.DefaultFeatureGate.Enabled(features.PodProbeMarkerGate) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -168,6 +170,8 @@ func (r *ReconcilePodProbeMarker) syncPodProbeMarker(ns, name string) error {
 			return err
 		}
 	}
+	// ppm 定义selector、 检测
+	// 遍历每一个pod ,找到对应nodeName ，将检测交由npp 完成。并将label 添加到pod上
 	// update podProbeMarker status
 	ppmClone := ppm.DeepCopy()
 	if err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {

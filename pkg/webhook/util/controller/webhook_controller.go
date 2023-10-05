@@ -22,6 +22,11 @@ import (
 	"sync"
 	"time"
 
+	configuration "github.com/openkruise/kruise/pkg/webhook/util/configuration"
+	crd "github.com/openkruise/kruise/pkg/webhook/util/crd"
+	generator "github.com/openkruise/kruise/pkg/webhook/util/generator"
+	writer "github.com/openkruise/kruise/pkg/webhook/util/writer"
+
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -43,10 +48,6 @@ import (
 
 	extclient "github.com/openkruise/kruise/pkg/client"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/configuration"
-	"github.com/openkruise/kruise/pkg/webhook/util/crd"
-	"github.com/openkruise/kruise/pkg/webhook/util/generator"
-	"github.com/openkruise/kruise/pkg/webhook/util/writer"
 )
 
 const (
@@ -79,99 +80,6 @@ type Controller struct {
 	synced          []cache.InformerSynced
 
 	queue workqueue.RateLimitingInterface
-}
-
-func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, error) {
-	c := &Controller{
-		kubeClient: extclient.GetGenericClientWithName("webhook-controller").KubeClient,
-		handlers:   handlers,
-		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "webhook-controller"),
-	}
-
-	c.informerFactory = informers.NewSharedInformerFactory(c.kubeClient, 0)
-
-	secretInformer := coreinformers.New(c.informerFactory, namespace, nil).Secrets()
-	admissionRegistrationInformer := admissionregistrationinformers.New(c.informerFactory, v1.NamespaceAll, nil)
-
-	secretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			secret := obj.(*v1.Secret)
-			if secret.Name == secretName {
-				klog.Infof("Secret %s added", secretName)
-				c.queue.Add("")
-			}
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			secret := cur.(*v1.Secret)
-			if secret.Name == secretName {
-				klog.Infof("Secret %s updated", secretName)
-				c.queue.Add("")
-			}
-		},
-	})
-
-	admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			conf := obj.(*admissionregistrationv1.MutatingWebhookConfiguration)
-			if conf.Name == mutatingWebhookConfigurationName {
-				klog.Infof("MutatingWebhookConfiguration %s added", mutatingWebhookConfigurationName)
-				c.queue.Add("")
-			}
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			conf := cur.(*admissionregistrationv1.MutatingWebhookConfiguration)
-			if conf.Name == mutatingWebhookConfigurationName {
-				klog.Infof("MutatingWebhookConfiguration %s update", mutatingWebhookConfigurationName)
-				c.queue.Add("")
-			}
-		},
-	})
-
-	admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			conf := obj.(*admissionregistrationv1.ValidatingWebhookConfiguration)
-			if conf.Name == validatingWebhookConfigurationName {
-				klog.Infof("ValidatingWebhookConfiguration %s added", validatingWebhookConfigurationName)
-				c.queue.Add("")
-			}
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			conf := cur.(*admissionregistrationv1.ValidatingWebhookConfiguration)
-			if conf.Name == validatingWebhookConfigurationName {
-				klog.Infof("ValidatingWebhookConfiguration %s updated", validatingWebhookConfigurationName)
-				c.queue.Add("")
-			}
-		},
-	})
-
-	c.crdClient = apiextensionsclientset.NewForConfigOrDie(cfg)
-	c.crdInformer = apiextensionsinformers.NewCustomResourceDefinitionInformer(c.crdClient, 0, cache.Indexers{})
-	c.crdInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			crd := obj.(*apiextensionsv1.CustomResourceDefinition)
-			if crd.Spec.Group == "apps.kruise.io" {
-				klog.Infof("CustomResourceDefinition %s added", crd.Name)
-				c.queue.Add("")
-			}
-		},
-		UpdateFunc: func(old, cur interface{}) {
-			crd := cur.(*apiextensionsv1.CustomResourceDefinition)
-			if crd.Spec.Group == "apps.kruise.io" {
-				klog.Infof("CustomResourceDefinition %s updated", crd.Name)
-				c.queue.Add("")
-			}
-		},
-	})
-	c.crdLister = apiextensionslisters.NewCustomResourceDefinitionLister(c.crdInformer.GetIndexer())
-
-	c.synced = []cache.InformerSynced{
-		secretInformer.Informer().HasSynced,
-		admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().HasSynced,
-		admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().HasSynced,
-		c.crdInformer.HasSynced,
-	}
-
-	return c, nil
 }
 
 func (c *Controller) Start(ctx context.Context) {
@@ -267,4 +175,99 @@ func (c *Controller) sync() error {
 		close(uninit)
 	})
 	return nil
+}
+
+func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, error) {
+	c := &Controller{
+		kubeClient: extclient.GetGenericClientWithName("webhook-controller").KubeClient,
+		handlers:   handlers,
+		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "webhook-controller"),
+	}
+
+	c.informerFactory = informers.NewSharedInformerFactory(c.kubeClient, 0)
+
+	secretInformer := coreinformers.New(c.informerFactory, namespace, nil).Secrets()
+	admissionRegistrationInformer := admissionregistrationinformers.New(c.informerFactory, v1.NamespaceAll, nil)
+	{
+
+		secretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				secret := obj.(*v1.Secret)
+				if secret.Name == secretName {
+					klog.Infof("Secret %s added", secretName)
+					c.queue.Add("")
+				}
+			},
+			UpdateFunc: func(old, cur interface{}) {
+				secret := cur.(*v1.Secret)
+				if secret.Name == secretName {
+					klog.Infof("Secret %s updated", secretName)
+					c.queue.Add("")
+				}
+			},
+		})
+
+		admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				conf := obj.(*admissionregistrationv1.MutatingWebhookConfiguration)
+				if conf.Name == mutatingWebhookConfigurationName {
+					klog.Infof("MutatingWebhookConfiguration %s added", mutatingWebhookConfigurationName)
+					c.queue.Add("")
+				}
+			},
+			UpdateFunc: func(old, cur interface{}) {
+				conf := cur.(*admissionregistrationv1.MutatingWebhookConfiguration)
+				if conf.Name == mutatingWebhookConfigurationName {
+					klog.Infof("MutatingWebhookConfiguration %s update", mutatingWebhookConfigurationName)
+					c.queue.Add("")
+				}
+			},
+		})
+
+		admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				conf := obj.(*admissionregistrationv1.ValidatingWebhookConfiguration)
+				if conf.Name == validatingWebhookConfigurationName {
+					klog.Infof("ValidatingWebhookConfiguration %s added", validatingWebhookConfigurationName)
+					c.queue.Add("")
+				}
+			},
+			UpdateFunc: func(old, cur interface{}) {
+				conf := cur.(*admissionregistrationv1.ValidatingWebhookConfiguration)
+				if conf.Name == validatingWebhookConfigurationName {
+					klog.Infof("ValidatingWebhookConfiguration %s updated", validatingWebhookConfigurationName)
+					c.queue.Add("")
+				}
+			},
+		})
+
+		c.crdClient = apiextensionsclientset.NewForConfigOrDie(cfg)
+		c.crdInformer = apiextensionsinformers.NewCustomResourceDefinitionInformer(c.crdClient, 0, cache.Indexers{})
+		c.crdInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				crd := obj.(*apiextensionsv1.CustomResourceDefinition)
+				if crd.Spec.Group == "apps.kruise.io" {
+					klog.Infof("CustomResourceDefinition %s added", crd.Name)
+					c.queue.Add("")
+				}
+			},
+			UpdateFunc: func(old, cur interface{}) {
+				crd := cur.(*apiextensionsv1.CustomResourceDefinition)
+				if crd.Spec.Group == "apps.kruise.io" {
+					klog.Infof("CustomResourceDefinition %s updated", crd.Name)
+					c.queue.Add("")
+				}
+			},
+		})
+		c.crdLister = apiextensionslisters.NewCustomResourceDefinitionLister(c.crdInformer.GetIndexer())
+	}
+
+	c.synced = []cache.InformerSynced{
+		secretInformer.Informer().HasSynced,
+		admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().HasSynced,
+		admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().HasSynced,
+		c.crdInformer.HasSynced,
+	}
+
+	return c, nil
 }

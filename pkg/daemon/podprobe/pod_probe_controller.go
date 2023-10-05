@@ -400,7 +400,7 @@ func (c *Controller) fetchLatestPodContainer(podUID, name string) (*runtimeapi.C
 			container = obj
 		}
 	}
-	var containerStatus *runtimeapi.ContainerStatusResponse
+	var containerStatus = new(runtimeapi.ContainerStatusResponse)
 	if container != nil {
 		containerStatus, err = runtimeService.ContainerStatus(container.Id, false)
 	}

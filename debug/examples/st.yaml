@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sidecar
+          image: registry.cn-hangzhou.aliyuncs.com/acejilam/term:v1
+          env:
+            - name: KRUISE_TERMINATE_SIDECAR_WHEN_JOB_EXIT
+              value: "true"
+        - name: main
+          image: centos:7
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "sleep 30s"

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
+
 	"github.com/appscode/jsonpatch"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -20,7 +22,6 @@ import (
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 )
 
 var inPlaceUpdateTemplateSpecPatchRexp = regexp.MustCompile("/containers/([0-9]+)/image")

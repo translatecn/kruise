@@ -6,7 +6,7 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/updatesort"
+	updatesort "github.com/openkruise/kruise/pkg/util/updatesort"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -36,72 +36,6 @@ func NewStrategy() Strategy {
 	return globalSpreadingStrategy
 }
 
-func (p *spreadingStrategy) GetNextUpgradePods(control sidecarcontrol.SidecarControl, pods []*corev1.Pod) (upgradePods []*corev1.Pod, notUpgradablePods []*corev1.Pod) {
-	sidecarset := control.GetSidecarset()
-	// wait to upgrade pod index
-	var waitUpgradedIndexes []int
-	// because SidecarSet in-place update only support upgrading Image, if other fields are changed they will not be upgraded.
-	var notUpgradableIndexes []int
-	strategy := sidecarset.Spec.UpdateStrategy
-
-	// If selector is not nil, check whether the pods is selected to upgrade
-	isSelected := func(pod *corev1.Pod) bool {
-		//when selector is nil, always return true
-		if strategy.Selector == nil {
-			return true
-		}
-		// if selector failed, always return false
-		selector, err := util.ValidatedLabelSelectorAsSelector(strategy.Selector)
-		if err != nil {
-			klog.Errorf("sidecarSet(%s) rolling selector error, err: %v", sidecarset.Name, err)
-			return false
-		}
-		//matched
-		if selector.Matches(labels.Set(pod.Labels)) {
-			return true
-		}
-		//Not matched, then return false
-		return false
-	}
-
-	//1. select which pods can be upgraded, the following:
-	//	* pod must be not updated for the latest sidecarSet
-	//	* If selector is not nil, this upgrade will only update the selected pods.
-	//  * In kubernetes cluster, when inplace update pod, only fields such as image can be updated for the container.
-	//  * It is to determine whether there are other fields that have been modified for pod.
-	for index, pod := range pods {
-		isUpdated := sidecarcontrol.IsPodSidecarUpdated(sidecarset, pod)
-		if !isUpdated && isSelected(pod) {
-			if control.IsSidecarSetUpgradable(pod) {
-				waitUpgradedIndexes = append(waitUpgradedIndexes, index)
-			} else if sidecarcontrol.GetPodSidecarSetWithoutImageRevision(sidecarset.Name, pod) != sidecarcontrol.GetSidecarSetWithoutImageRevision(sidecarset) {
-				// only image field can be in-place updated, if other fields changed, mark pod as not upgradable
-				notUpgradableIndexes = append(notUpgradableIndexes, index)
-			}
-		}
-	}
-
-	klog.V(3).Infof("sidecarSet(%s) matchedPods(%d) waitUpdated(%d) notUpgradable(%d)", sidecarset.Name, len(pods), len(waitUpgradedIndexes), len(notUpgradableIndexes))
-	//2. sort Pods with default sequence and scatter
-	waitUpgradedIndexes = SortUpdateIndexes(strategy, pods, waitUpgradedIndexes)
-
-	//3. calculate to be upgraded pods number for the time
-	needToUpgradeCount := calculateUpgradeCount(control, waitUpgradedIndexes, pods)
-	if needToUpgradeCount < len(waitUpgradedIndexes) {
-		waitUpgradedIndexes = waitUpgradedIndexes[:needToUpgradeCount]
-	}
-
-	//4. injectPods will be upgraded in the following process
-	for _, idx := range waitUpgradedIndexes {
-		upgradePods = append(upgradePods, pods[idx])
-	}
-	// 5. pods that are not upgradable will not be skipped in the following process
-	for _, idx := range notUpgradableIndexes {
-		notUpgradablePods = append(notUpgradablePods, pods[idx])
-	}
-	return
-}
-
 // SortUpdateIndexes sorts the given waitUpdateIndexes of Pods to update according to the SidecarSet update strategy.
 func SortUpdateIndexes(strategy appsv1alpha1.SidecarSetUpdateStrategy, pods []*corev1.Pod, waitUpdateIndexes []int) []int {
 	//Sort Pods with default sequence
@@ -122,7 +56,7 @@ func SortUpdateIndexes(strategy appsv1alpha1.SidecarSetUpdateStrategy, pods []*c
 	if strategy.ScatterStrategy != nil {
 		// convert regular terms to scatter terms
 		// for examples: labelA=* -> labelA=value1, labelA=value2...(labels in pod definition)
-		scatter := parseUpdateScatterTerms(strategy.ScatterStrategy, pods)
+		scatter := parseUpdateScatterTerms(strategy.ScatterStrategy, pods) // 所有符合条件的  k:v 组合
 		waitUpdateIndexes = updatesort.NewScatterSorter(scatter).Sort(pods, waitUpdateIndexes)
 	}
 
@@ -176,6 +110,73 @@ func calculateUpgradeCount(coreControl sidecarcontrol.SidecarControl, waitUpdate
 	return needUpgradeCount
 }
 
+func (p *spreadingStrategy) GetNextUpgradePods(control sidecarcontrol.SidecarControl, pods []*corev1.Pod) (upgradePods []*corev1.Pod, notUpgradablePods []*corev1.Pod) {
+	sidecarset := control.GetSidecarset()
+	// wait to upgrade pod index
+	var waitUpgradedIndexes []int
+	// because SidecarSet in-place update only support upgrading Image, if other fields are changed they will not be upgraded.
+	var notUpgradableIndexes []int
+	strategy := sidecarset.Spec.UpdateStrategy
+
+	// If selector is not nil, check whether the pods is selected to upgrade
+	isSelected := func(pod *corev1.Pod) bool {
+		//when selector is nil, always return true
+		if strategy.Selector == nil {
+			return true
+		}
+		// if selector failed, always return false
+		selector, err := util.ValidatedLabelSelectorAsSelector(strategy.Selector)
+		if err != nil {
+			klog.Errorf("sidecarSet(%s) rolling selector error, err: %v", sidecarset.Name, err)
+			return false
+		}
+		//matched
+		if selector.Matches(labels.Set(pod.Labels)) {
+			return true
+		}
+		//Not matched, then return false
+		return false
+	}
+
+	//1. select which pods can be upgraded, the following:
+	//	* pod must be not updated for the latest sidecarSet
+	//	* If selector is not nil, this upgrade will only update the selected pods.
+	//  * In kubernetes cluster, when inplace update pod, only fields such as image can be updated for the container.
+	//  * It is to determine whether there are other fields that have been modified for pod.
+	for index, pod := range pods {
+		isUpdated := sidecarcontrol.IsPodSidecarUpdated(sidecarset, pod)
+		if !isUpdated && isSelected(pod) {
+			if control.IsSidecarSetUpgradable(pod) { // pod 与  side carset能对得上，且pod  image和status 都没有发生过改变
+				waitUpgradedIndexes = append(waitUpgradedIndexes, index)
+			} else if sidecarcontrol.GetPodSidecarSetWithoutImageRevision(sidecarset.Name, pod) != sidecarcontrol.GetSidecarSetWithoutImageRevision(sidecarset) {
+				// pod 与  side carset能对不上
+				// only image field can be in-place updated, if other fields changed, mark pod as not upgradable
+				notUpgradableIndexes = append(notUpgradableIndexes, index)
+			}
+		}
+	}
+
+	klog.V(3).Infof("sidecarSet(%s) matchedPods(%d) waitUpdated(%d) notUpgradable(%d)", sidecarset.Name, len(pods), len(waitUpgradedIndexes), len(notUpgradableIndexes))
+	//2. sort Pods with default sequence and scatter
+	waitUpgradedIndexes = SortUpdateIndexes(strategy, pods, waitUpgradedIndexes)
+
+	//3. calculate to be upgraded pods number for the time
+	needToUpgradeCount := calculateUpgradeCount(control, waitUpgradedIndexes, pods)
+	if needToUpgradeCount < len(waitUpgradedIndexes) {
+		waitUpgradedIndexes = waitUpgradedIndexes[:needToUpgradeCount]
+	}
+
+	//4. injectPods will be upgraded in the following process
+	for _, idx := range waitUpgradedIndexes {
+		upgradePods = append(upgradePods, pods[idx])
+	}
+	// 5. pods that are not upgradable will not be skipped in the following process
+	for _, idx := range notUpgradableIndexes {
+		notUpgradablePods = append(notUpgradablePods, pods[idx])
+	}
+	return
+}
+
 func parseUpdateScatterTerms(scatter appsv1alpha1.UpdateScatterStrategy, pods []*corev1.Pod) appsv1alpha1.UpdateScatterStrategy {
 	newScatter := appsv1alpha1.UpdateScatterStrategy{}
 	for _, term := range scatter {
@@ -185,7 +186,7 @@ func parseUpdateScatterTerms(scatter appsv1alpha1.UpdateScatterStrategy, pods []
 		}
 		// convert regular terms to scatter terms
 		// examples: labelA=* -> labelA=value1, labelA=value2...
-		newTerms := matchScatterTerms(pods, term.Key)
+		newTerms := matchScatterTerms(pods, term.Key) // 就是遍历一次，把所有符合的找出来
 		for _, obj := range newTerms {
 			newScatter = insertUpdateScatterTerm(newScatter, obj)
 		}

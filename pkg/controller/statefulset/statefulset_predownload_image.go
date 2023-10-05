@@ -32,10 +32,10 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
-	"github.com/openkruise/kruise/pkg/util/expectations"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	imagejobutilfunc "github.com/openkruise/kruise/pkg/util/imagejob/utilfunction"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 func (dss *defaultStatefulSetControl) createImagePullJobsForInPlaceUpdate(sts *appsv1beta1.StatefulSet, currentRevision, updateRevision *apps.ControllerRevision) error {

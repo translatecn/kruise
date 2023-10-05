@@ -1,0 +1,33 @@
+apiVersion: apps.kruise.io/v1alpha1
+kind: ImagePullJob
+metadata:
+  name: job-with-always2
+spec:
+  image: nginx:1.9.1   # [required] 完整的镜像名 name:tag
+  parallelism: 10      # [optional] 最大并发拉取的节点梳理, 默认为 1
+#  podSelector:
+#    matchLabels:
+#       {the selector of CloneSet}
+#    matchExpressions:
+#      - key: controller-revision-hash
+#        operator: NotIn
+#        values:
+#        - {the updateRevision of CloneSet}
+#  selector: # [optional] 指定节点的 名字列表 或 标签选择器 (只能设置其中一种)
+#    names:
+#      - kind-worker3
+#    matchLabels:
+#      "kubernetes:io/hostname": kind-worker3
+  completionPolicy:
+    type: Always                  # [optional] 默认为 Always
+    activeDeadlineSeconds: 1200   # [optional] 无默认值, 只对 Always 类型生效, 整个 job 的 deadline 结束时间
+    ttlSecondsAfterFinished: 300  # [optional] 无默认值, 只对 Always 类型生效, 结束后超过这个时间，自动清理删除 job
+  pullPolicy: # [optional] 默认 backoffLimit=3, timeoutSeconds=600
+    backoffLimit: 3
+    timeoutSeconds: 300
+  pullSecrets:
+#  sandboxConfig:                  # 传递给 cri
+#    annotations:
+#      io.kubernetes.image.metrics.tags: "cluster=cn-shanghai"
+#    labels:
+#      io.kubernetes.image.app: "foo"

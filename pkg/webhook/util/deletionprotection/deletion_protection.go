@@ -20,10 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	v1 "k8s.io/api/core/v1"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,22 +32,6 @@ import (
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func ValidateWorkloadDeletion(obj metav1.Object, replicas *int32) error {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourcesDeletionProtection) || obj == nil || obj.GetDeletionTimestamp() != nil {
-		return nil
-	}
-	switch val := obj.GetLabels()[policyv1alpha1.DeletionProtectionKey]; val {
-	case policyv1alpha1.DeletionProtectionTypeAlways:
-		return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s", policyv1alpha1.DeletionProtectionKey, val)
-	case policyv1alpha1.DeletionProtectionTypeCascading:
-		if replicas != nil && *replicas > 0 {
-			return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s and replicas %d>0", policyv1alpha1.DeletionProtectionKey, val, *replicas)
-		}
-	default:
-	}
-	return nil
-}
 
 func ValidateNamespaceDeletion(c client.Client, namespace *v1.Namespace) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourcesDeletionProtection) || namespace.DeletionTimestamp != nil {
@@ -100,6 +83,9 @@ func ValidateCRDDeletion(c client.Client, obj metav1.Object, gvk schema.GroupVer
 	case policyv1alpha1.DeletionProtectionTypeAlways:
 		return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s", policyv1alpha1.DeletionProtectionKey, val)
 	case policyv1alpha1.DeletionProtectionTypeCascading:
+		if !utilfeature.DefaultFeatureGate.Enabled(features.DeletionProtectionForCRDCascadingGate) {
+			return fmt.Errorf("feature-gate %s is not enabled", features.DeletionProtectionForCRDCascadingGate)
+		}
 		objList := &unstructured.UnstructuredList{}
 		objList.SetAPIVersion(gvk.GroupVersion().String())
 		objList.SetKind(gvk.Kind)
@@ -115,6 +101,24 @@ func ValidateCRDDeletion(c client.Client, obj metav1.Object, gvk schema.GroupVer
 		}
 		if activeCount > 0 {
 			return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s and active CRs %d>0", policyv1alpha1.DeletionProtectionKey, val, activeCount)
+		}
+	default:
+	}
+	return nil
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+
+func ValidateWorkloadDeletion(obj metav1.Object, replicas *int32) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourcesDeletionProtection) || obj == nil || obj.GetDeletionTimestamp() != nil {
+		return nil
+	}
+	switch val := obj.GetLabels()[policyv1alpha1.DeletionProtectionKey]; val {
+	case policyv1alpha1.DeletionProtectionTypeAlways:
+		return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s", policyv1alpha1.DeletionProtectionKey, val)
+	case policyv1alpha1.DeletionProtectionTypeCascading:
+		if replicas != nil && *replicas > 0 {
+			return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s and replicas %d>0", policyv1alpha1.DeletionProtectionKey, val, *replicas)
 		}
 	default:
 	}

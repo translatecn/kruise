@@ -23,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
+	revisionadapter "github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 // UpdateExpectations is an interface that allows users to set and wait on expectations of pods update.

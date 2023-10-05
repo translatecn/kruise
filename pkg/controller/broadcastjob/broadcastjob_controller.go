@@ -24,12 +24,13 @@ import (
 	"sync"
 	"time"
 
+	ratelimiter "github.com/openkruise/kruise/pkg/util/ratelimiter"
+
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
-	"github.com/openkruise/kruise/pkg/util/expectations"
-	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+	expectations "github.com/openkruise/kruise/pkg/util/expectations"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -77,6 +78,24 @@ var (
 	scaleExpectations        = expectations.NewScaleExpectations()
 )
 
+var _ reconcile.Reconciler = &ReconcileBroadcastJob{}
+
+// ReconcileBroadcastJob reconciles a BroadcastJob object
+type ReconcileBroadcastJob struct {
+	client.Client
+	scheme   *runtime.Scheme
+	recorder record.EventRecorder
+	// podModifier is only for testing to set the pod.Name, if pod.GenerateName is used
+	podModifier func(pod *corev1.Pod)
+}
+
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs/finalizers,verbs=update
+
 // Add creates a new BroadcastJob Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
@@ -107,13 +126,13 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to BroadcastJob
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.BroadcastJob{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(&source.Kind{Type: &appsv1alpha1.BroadcastJob{}}, &EnqueueRequestForObject{})
 	if err != nil {
 		return err
 	}
 
 	// Watch for changes to Pod
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &podEventHandler{
+	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &podEventHandler{ // ✅
 		enqueueHandler: handler.EnqueueRequestForOwner{
 			IsController: true,
 			OwnerType:    &appsv1alpha1.BroadcastJob{},
@@ -126,24 +145,6 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Watch for changes to Node
 	return c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{reader: mgr.GetCache()})
 }
-
-var _ reconcile.Reconciler = &ReconcileBroadcastJob{}
-
-// ReconcileBroadcastJob reconciles a BroadcastJob object
-type ReconcileBroadcastJob struct {
-	client.Client
-	scheme   *runtime.Scheme
-	recorder record.EventRecorder
-	// podModifier is only for testing to set the pod.Name, if pod.GenerateName is used
-	podModifier func(pod *corev1.Pod)
-}
-
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs/finalizers,verbs=update
 
 // Reconcile reads that state of the cluster for a BroadcastJob object and makes changes based on the state read
 // and what is in the BroadcastJob.Spec
@@ -177,7 +178,7 @@ func (r *ReconcileBroadcastJob) Reconcile(_ context.Context, request reconcile.R
 	addLabelToPodTemplate(job)
 
 	if IsJobFinished(job) {
-		isPast, leftTime := pastTTLDeadline(job)
+		isPast, leftTime := pastTTLDeadline(job) //  在完成之后的存活时间
 		if isPast {
 			klog.Infof("deleting the job %s", job.Name)
 			err = r.Delete(context.TODO(), job)
@@ -230,7 +231,7 @@ func (r *ReconcileBroadcastJob) Reconcile(_ context.Context, request reconcile.R
 	}
 
 	// Get the map (nodeName -> Pod) for pods with node assigned
-	existingNodeToPodMap := r.getNodeToPodMap(pods, job)
+	existingNodeToPodMap := r.getNodeToPodMap(pods, job) // 当前job 启动的pod 在每个节点上的pod
 	// list all nodes in cluster
 	nodes := &corev1.NodeList{}
 	err = r.List(context.TODO(), nodes)
@@ -245,7 +246,15 @@ func (r *ReconcileBroadcastJob) Reconcile(_ context.Context, request reconcile.R
 	failed := int32(len(failedPods))
 	succeeded := int32(len(succeededPods))
 
-	desiredNodes, restNodesToRunPod, podsToDelete := getNodesToRunPod(nodes, job, existingNodeToPodMap)
+	isDeadLine := func(job *appsv1alpha1.BroadcastJob) bool {
+		if job.Spec.CompletionPolicy.Type == appsv1alpha1.Always &&
+			job.Spec.CompletionPolicy.ActiveDeadlineSeconds != nil {
+			return time.Since(job.CreationTimestamp.Time) >= time.Duration(*job.Spec.CompletionPolicy.ActiveDeadlineSeconds)*time.Second
+		}
+		return false
+	}
+
+	desiredNodes, restNodesToRunPod, podsToDelete := getNodesToRunPod(nodes, job, existingNodeToPodMap, isDeadLine)
 	desired := int32(len(desiredNodes))
 	klog.Infof("%s/%s has %d/%d nodes remaining to schedule pods", job.Namespace, job.Name, len(restNodesToRunPod), desired)
 	klog.Infof("Before broadcastjob reconcile %s/%s, desired=%d, active=%d, failed=%d", job.Namespace, job.Name, desired, active, failed)
@@ -336,6 +345,85 @@ func (r *ReconcileBroadcastJob) Reconcile(_ context.Context, request reconcile.R
 	return reconcile.Result{RequeueAfter: requeueAfter}, err
 }
 
+// addLabelToPodTemplate will add the pre-defined labels to the pod template so that the pods created will
+// have these labels associated. The labels can be used for querying pods for a specific job
+func addLabelToPodTemplate(job *appsv1alpha1.BroadcastJob) {
+	if job.Spec.Template.Labels == nil {
+		job.Spec.Template.Labels = make(map[string]string)
+	}
+	for k, v := range labelsAsMap(job) {
+		job.Spec.Template.Labels[k] = v
+	}
+}
+
+func labelsAsMap(job *appsv1alpha1.BroadcastJob) map[string]string {
+	return map[string]string{
+		JobNameLabelKey:       job.Name,
+		ControllerUIDLabelKey: string(job.UID),
+	}
+}
+
+// getNodesToRunPod returns
+// * desiredNodes : the nodes desired to run pods including node with or without running pods
+// * restNodesToRunPod:  the nodes do not have pods running yet, excluding the nodes not satisfying constraints such as affinity, taints
+// * podsToDelete: the pods that do not satisfy the node constraint any more
+func getNodesToRunPod(nodes *corev1.NodeList, job *appsv1alpha1.BroadcastJob,
+	existingNodeToPodMap map[string]*corev1.Pod,
+	isDeadline func(job *appsv1alpha1.BroadcastJob) bool,
+) (map[string]*corev1.Pod, []*corev1.Node, []*corev1.Pod) {
+
+	var podsToDelete []*corev1.Pod
+	var restNodesToRunPod []*corev1.Node
+	desiredNodes := make(map[string]*corev1.Pod)
+	for i, node := range nodes.Items {
+
+		var canFit bool
+		var err error
+		// there's pod existing on the node
+		if pod, ok := existingNodeToPodMap[node.Name]; ok {
+			canFit, err = checkNodeFitness(pod, &node)
+			if !canFit && pod.DeletionTimestamp == nil {
+				klog.Infof("Pod %s does not fit on node %s due to %v", pod.Name, node.Name, err)
+				podsToDelete = append(podsToDelete, pod)
+				continue
+			} else if isDeadline(job) {
+				klog.Infof("Pod %s need to delete due to deadline", pod.Name)
+				podsToDelete = append(podsToDelete, pod)
+				continue
+			}
+			desiredNodes[node.Name] = pod
+		} else {
+			// no pod exists, mock a pod to check if the pod can fit on the node,
+			// considering nodeName, label affinity and taints
+			mockPod := NewMockPod(job, node.Name)
+			canFit, err = checkNodeFitness(mockPod, &node)
+			if !canFit {
+				klog.Infof("Pod does not fit on node %s due to %v", node.Name, err)
+				continue
+			}
+			restNodesToRunPod = append(restNodesToRunPod, &nodes.Items[i])
+			desiredNodes[node.Name] = nil
+		}
+	}
+	return desiredNodes, restNodesToRunPod, podsToDelete
+}
+
+// getNodeToPodMap scans the pods and construct a map : nodeName -> pod.
+// Ideally, each node should have only 1 pod. Else, something is wrong.
+func (r *ReconcileBroadcastJob) getNodeToPodMap(pods []*corev1.Pod, job *appsv1alpha1.BroadcastJob) map[string]*corev1.Pod {
+	nodeToPodMap := make(map[string]*corev1.Pod)
+	for i, pod := range pods {
+		nodeName := getAssignedNode(pod)
+		if _, ok := nodeToPodMap[nodeName]; ok {
+			// should not happen
+			klog.Warningf("Duplicated pod %s run on the same node %s. this should not happen.", pod.Name, nodeName)
+			r.recorder.Eventf(job, corev1.EventTypeWarning, "DuplicatePodCreatedOnSameNode",
+				"Duplicated pod %s found on same node %s", pod.Name, nodeName)
+		}
+		nodeToPodMap[nodeName] = pods[i]
+	}
+	return nodeToPodMap
+}
 func (r *ReconcileBroadcastJob) updateJobStatus(request reconcile.Request, job *appsv1alpha1.BroadcastJob) error {
 	klog.Infof("Updating job %s status %#v", job.Name, job.Status)
 	jobCopy := job.DeepCopy()
@@ -357,6 +445,57 @@ func (r *ReconcileBroadcastJob) updateJobStatus(request reconcile.Request, job *
 	})
 }
 
+// isJobFailed checks if the job CompletionPolicy is not Never, and it has past ActiveDeadlineSeconds.
+func isJobFailed(job *appsv1alpha1.BroadcastJob, pods []*corev1.Pod) (bool, string, string) {
+	if job.Spec.CompletionPolicy.Type == appsv1alpha1.Never {
+		return false, "", ""
+	}
+	jobFailed := false
+	var failureReason string
+	var failureMessage string
+	if pastActiveDeadline(job) {
+		jobFailed = true
+		failureReason = "DeadlineExceeded"
+		failureMessage = fmt.Sprintf("Job %s/%s was active longer than specified deadline", job.Namespace, job.Name)
+	}
+	return jobFailed, failureReason, failureMessage
+}
+
+// deleteJobPods delete the pods concurrently and wait for them to be done
+func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, pods []*corev1.Pod, failed, active int32) (int32, int32, error) {
+	errCh := make(chan error, len(pods))
+	wait := sync.WaitGroup{}
+	nbPods := len(pods)
+	var failedLock sync.Mutex
+	wait.Add(nbPods)
+	for i := int32(0); i < int32(nbPods); i++ {
+		go func(ix int32) {
+			defer wait.Done()
+			key := types.NamespacedName{Namespace: job.Namespace, Name: job.Name}.String()
+			scaleExpectations.ExpectScale(key, expectations.Delete, getAssignedNode(pods[ix]))
+			if err := r.Delete(context.TODO(), pods[ix]); err != nil {
+				scaleExpectations.ObserveScale(key, expectations.Delete, getAssignedNode(pods[ix]))
+				defer utilruntime.HandleError(err)
+				klog.Infof("Failed to delete %v, job %q/%q", pods[ix].Name, job.Namespace, job.Name)
+				errCh <- err
+			} else {
+				failedLock.Lock()
+				failed++
+				active--
+				r.recorder.Eventf(job, corev1.EventTypeNormal, kubecontroller.SuccessfulDeletePodReason, "Delete pod: %v", pods[ix].Name)
+				failedLock.Unlock()
+			}
+		}(i)
+	}
+	wait.Wait()
+	var manageJobErr error
+	select {
+	case manageJobErr = <-errCh:
+	default:
+	}
+	return failed, active, manageJobErr
+}
+
 // finishJob appends the condition to JobStatus, and sets ttl if needed
 func finishJob(job *appsv1alpha1.BroadcastJob, conditionType appsv1alpha1.JobConditionType, message string) time.Duration {
 	job.Status.Conditions = append(job.Status.Conditions, newCondition(conditionType, string(conditionType), message))
@@ -375,15 +514,24 @@ func finishJob(job *appsv1alpha1.BroadcastJob, conditionType appsv1alpha1.JobCon
 	return requeueAfter
 }
 
-// addLabelToPodTemplate will add the pre-defined labels to the pod template so that the pods created will
-// have these labels associated. The labels can be used for querying pods for a specific job
-func addLabelToPodTemplate(job *appsv1alpha1.BroadcastJob) {
-	if job.Spec.Template.Labels == nil {
-		job.Spec.Template.Labels = make(map[string]string)
+// isJobComplete returns true if all pods on all desiredNodes are either succeeded or failed or deletionTimestamp !=nil.
+func isJobComplete(job *appsv1alpha1.BroadcastJob, desiredNodes map[string]*corev1.Pod) bool {
+	if job.Spec.CompletionPolicy.Type == appsv1alpha1.Never {
+		// the job will not terminate, if the the completion policy is never
+		return false
 	}
-	for k, v := range labelsAsMap(job) {
-		job.Spec.Template.Labels[k] = v
+	// if no desiredNodes, job pending
+	if len(desiredNodes) == 0 {
+		klog.Info("Num desiredNodes is 0")
+		return false
 	}
+	for _, pod := range desiredNodes {
+		if pod == nil || kubecontroller.IsPodActive(pod) {
+			// the job is incomplete if there exits any pod not yet created OR  still active
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
@@ -473,105 +621,6 @@ func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
 	return active, err
 }
 
-// isJobComplete returns true if all pods on all desiredNodes are either succeeded or failed or deletionTimestamp !=nil.
-func isJobComplete(job *appsv1alpha1.BroadcastJob, desiredNodes map[string]*corev1.Pod) bool {
-	if job.Spec.CompletionPolicy.Type == appsv1alpha1.Never {
-		// the job will not terminate, if the the completion policy is never
-		return false
-	}
-	// if no desiredNodes, job pending
-	if len(desiredNodes) == 0 {
-		klog.Info("Num desiredNodes is 0")
-		return false
-	}
-	for _, pod := range desiredNodes {
-		if pod == nil || kubecontroller.IsPodActive(pod) {
-			// the job is incomplete if there exits any pod not yet created OR  still active
-			return false
-		}
-	}
-	return true
-}
-
-// isJobFailed checks if the job CompletionPolicy is not Never, and it has past ActiveDeadlineSeconds.
-func isJobFailed(job *appsv1alpha1.BroadcastJob, pods []*corev1.Pod) (bool, string, string) {
-	if job.Spec.CompletionPolicy.Type == appsv1alpha1.Never {
-		return false, "", ""
-	}
-	jobFailed := false
-	var failureReason string
-	var failureMessage string
-	if pastActiveDeadline(job) {
-		jobFailed = true
-		failureReason = "DeadlineExceeded"
-		failureMessage = fmt.Sprintf("Job %s/%s was active longer than specified deadline", job.Namespace, job.Name)
-	}
-	return jobFailed, failureReason, failureMessage
-}
-
-// getNodesToRunPod returns
-// * desiredNodes : the nodes desired to run pods including node with or without running pods
-// * restNodesToRunPod:  the nodes do not have pods running yet, excluding the nodes not satisfying constraints such as affinity, taints
-// * podsToDelete: the pods that do not satisfy the node constraint any more
-func getNodesToRunPod(nodes *corev1.NodeList, job *appsv1alpha1.BroadcastJob,
-	existingNodeToPodMap map[string]*corev1.Pod) (map[string]*corev1.Pod, []*corev1.Node, []*corev1.Pod) {
-
-	var podsToDelete []*corev1.Pod
-	var restNodesToRunPod []*corev1.Node
-	desiredNodes := make(map[string]*corev1.Pod)
-	for i, node := range nodes.Items {
-
-		var canFit bool
-		var err error
-		// there's pod existing on the node
-		if pod, ok := existingNodeToPodMap[node.Name]; ok {
-			canFit, err = checkNodeFitness(pod, &node)
-			if !canFit && pod.DeletionTimestamp == nil {
-				klog.Infof("Pod %s does not fit on node %s due to %v", pod.Name, node.Name, err)
-				podsToDelete = append(podsToDelete, pod)
-				continue
-			}
-			desiredNodes[node.Name] = pod
-		} else {
-			// no pod exists, mock a pod to check if the pod can fit on the node,
-			// considering nodeName, label affinity and taints
-			mockPod := NewMockPod(job, node.Name)
-			canFit, err = checkNodeFitness(mockPod, &node)
-			if !canFit {
-				klog.Infof("Pod does not fit on node %s due to %v", node.Name, err)
-				continue
-			}
-			restNodesToRunPod = append(restNodesToRunPod, &nodes.Items[i])
-			desiredNodes[node.Name] = nil
-		}
-	}
-	return desiredNodes, restNodesToRunPod, podsToDelete
-}
-
-// getNodeToPodMap scans the pods and construct a map : nodeName -> pod.
-// Ideally, each node should have only 1 pod. Else, something is wrong.
-func (r *ReconcileBroadcastJob) getNodeToPodMap(pods []*corev1.Pod, job *appsv1alpha1.BroadcastJob) map[string]*corev1.Pod {
-	nodeToPodMap := make(map[string]*corev1.Pod)
-	for i, pod := range pods {
-		nodeName := getAssignedNode(pod)
-		if _, ok := nodeToPodMap[nodeName]; ok {
-			// should not happen
-			klog.Warningf("Duplicated pod %s run on the same node %s. this should not happen.", pod.Name, nodeName)
-			r.recorder.Eventf(job, corev1.EventTypeWarning, "DuplicatePodCreatedOnSameNode",
-				"Duplicated pod %s found on same node %s", pod.Name, nodeName)
-		}
-		nodeToPodMap[nodeName] = pods[i]
-	}
-	return nodeToPodMap
-}
-
-func labelsAsMap(job *appsv1alpha1.BroadcastJob) map[string]string {
-	return map[string]string{
-		JobNameLabelKey:       job.Name,
-		ControllerUIDLabelKey: string(job.UID),
-	}
-}
-
 // checkNodeFitness runs a set of predicates that select candidate nodes for the job pod;
 // the predicates include:
 //   - PodFitsHost: checks pod's NodeName against node
@@ -603,6 +652,7 @@ func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
 	}
 
 	// If pod tolerate unschedulable taint, it's also tolerate `node.Spec.Unschedulable`.
+	// pod 容不容忍污点
 	podToleratesUnschedulable := v1helper.TolerationsTolerateTaint(pod.Spec.Tolerations, &corev1.Taint{
 		Key:    corev1.TaintNodeUnschedulable,
 		Effect: corev1.TaintEffectNoSchedule,
@@ -624,6 +674,13 @@ func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
 	return true, nil
 }
 
+// NewMockPod creates a new mock pod
+func NewMockPod(job *appsv1alpha1.BroadcastJob, nodeName string) *corev1.Pod {
+	newPod := &corev1.Pod{Spec: job.Spec.Template.Spec, ObjectMeta: job.Spec.Template.ObjectMeta}
+	newPod.Namespace = job.Namespace
+	newPod.Spec.NodeName = nodeName
+	return newPod
+}
 func logPredicateFailedReason(node *corev1.Node, status *framework.Status) (bool, error) {
 	if status.IsSuccess() {
 		return true, nil
@@ -632,49 +689,6 @@ func logPredicateFailedReason(node *corev1.Node, status *framework.Status) (bool
 		klog.Errorf("Failed predicate on node %s : %s ", node.Name, reason)
 	}
 	return status.IsSuccess(), status.AsError()
-}
-
-// NewMockPod creates a new mock pod
-func NewMockPod(job *appsv1alpha1.BroadcastJob, nodeName string) *corev1.Pod {
-	newPod := &corev1.Pod{Spec: job.Spec.Template.Spec, ObjectMeta: job.Spec.Template.ObjectMeta}
-	newPod.Namespace = job.Namespace
-	newPod.Spec.NodeName = nodeName
-	return newPod
-}
-
-// deleteJobPods delete the pods concurrently and wait for them to be done
-func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, pods []*corev1.Pod, failed, active int32) (int32, int32, error) {
-	errCh := make(chan error, len(pods))
-	wait := sync.WaitGroup{}
-	nbPods := len(pods)
-	var failedLock sync.Mutex
-	wait.Add(nbPods)
-	for i := int32(0); i < int32(nbPods); i++ {
-		go func(ix int32) {
-			defer wait.Done()
-			key := types.NamespacedName{Namespace: job.Namespace, Name: job.Name}.String()
-			scaleExpectations.ExpectScale(key, expectations.Delete, getAssignedNode(pods[ix]))
-			if err := r.Delete(context.TODO(), pods[ix]); err != nil {
-				scaleExpectations.ObserveScale(key, expectations.Delete, getAssignedNode(pods[ix]))
-				defer utilruntime.HandleError(err)
-				klog.Infof("Failed to delete %v, job %q/%q", pods[ix].Name, job.Namespace, job.Name)
-				errCh <- err
-			} else {
-				failedLock.Lock()
-				failed++
-				active--
-				r.recorder.Eventf(job, corev1.EventTypeNormal, kubecontroller.SuccessfulDeletePodReason, "Delete pod: %v", pods[ix].Name)
-				failedLock.Unlock()
-			}
-		}(i)
-	}
-	wait.Wait()
-	var manageJobErr error
-	select {
-	case manageJobErr = <-errCh:
-	default:
-	}
-	return failed, active, manageJobErr
 }
 
 func (r *ReconcileBroadcastJob) createPodOnNode(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
